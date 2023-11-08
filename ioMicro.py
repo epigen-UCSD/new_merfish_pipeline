@@ -316,6 +316,7 @@ def stitch3D(im_segm,niter=5,th_int=0.5):
         for iim in range(len(im_segm)-1):
             im_segm[iim],im_segm[iim+1] = get_int_im1_im2(im_segm[iim],im_segm[iim+1],th_int=th_int)
     return im_segm
+
 def standard_segmentation(im_dapi,resc=4,sz_min_2d=400,sz_cell=22,use_gpu=True,model='cyto',p99=2000):
     """Using cellpose with nuclei mode"""
     from cellpose import models, io,utils
@@ -464,7 +465,25 @@ def get_txyz_small(im0_,im1_,sz_norm=10,delta=3,plt_val=False):
     txyz = np.unravel_index(np.argmin(im_cor), im_cor.shape)-np.array(im0.shape)+1
     #txyz = np.unravel_index(np.argmax(im_cor_),im_cor_.shape)+delta_
     return txyz
-
+def full_deconv(im_,s_=500,pad=100,psf=None,parameters={'method': 'wiener', 'beta': 0.001, 'niter': 50},gpu=True,force=False):
+    im0=np.zeros_like(im_)
+    sx,sy = im_.shape[1:]
+    ixys = []
+    for ix in np.arange(0,sx,s_):
+        for iy in np.arange(0,sy,s_):
+            ixys.append([ix,iy])
+    
+    for ix,iy in ixys:#ixys:#tqdm(ixys):
+        imsm = im_[:,ix:ix+pad+s_,iy:iy+pad+s_]
+        imt = apply_deconv(imsm,psf=psf,parameters=parameters,gpu=gpu,plt_val=False,force=force)
+        torch.cuda.empty_cache()
+        start_x = ix+pad//2 if ix>0 else 0
+        end_x = ix+pad//2+s_
+        start_y = iy+pad//2 if iy>0 else 0
+        end_y = iy+pad//2+s_
+        #print(start_x,end_x,start_y,end_y)
+        im0[:,start_x:end_x,start_y:end_y] = imt[:,(start_x-ix):(end_x-ix),(start_y-iy):(end_y-iy)]
+    return im0
 def get_txyz_small(im0_,im1_,sz_norm=10,plt_val=False,return_cor=False):
     im0 = np.array(im0_,dtype=np.float32)
     im1 = np.array(im1_,dtype=np.float32)
@@ -722,16 +741,13 @@ def apply_deconv(imsm,psf=None,plt_val=False,parameters = {'method':'wiener','be
     elif method=='spitfire':
         from sdeconv.deconv import Spitfire
         filter_ = Spitfire(psf, weight=0.6, reg=0.995, gradient_step=0.01, precision=1e-6, pad=pad)
-    
     out_image = filter_(imsm_)
-     
-    #out_image = out_image.cpu().detach().numpy().astype(np.float32)
-    out_image_ = out_image.cpu().detach().numpy().astype(np.float32)
+    out_image = out_image.cpu().detach().numpy().astype(np.float32)
     if plt_val:
         import napari
-        viewer = napari.view_image(out_image_)
+        viewer = napari.view_image(out_image)
         viewer.add_image(imsm)
-    return out_image_
+    return out_image
 def get_local_maxfast(im_dif,th_fit,im_raw=None,dic_psf=None,delta=1,delta_fit=3,sigmaZ=1,sigmaXY=1.5):
     z,x,y = np.where(im_dif>th_fit)
     zmax,xmax,ymax = im_dif.shape
@@ -820,10 +836,10 @@ def get_local_maxfast_tensor(im_dif_npy,th_fit=500,im_raw=None,dic_psf=None,delt
     def get_ind(x,xmax):
         # modify x_ to be within image
         x_ = torch.clone(x)
-        bad = x_>=xmax
-        x_[bad]=xmax-x_[bad]-2
         bad = x_<0
         x_[bad]=-x_[bad]
+        bad = x_>=xmax
+        x_[bad]=xmax-x_[bad]-2
         return x_
     #def get_ind(x,xmax):return x%xmax
     for d1 in range(-delta,delta+1):
@@ -1347,29 +1363,6 @@ class drift_refiner():
         self.data_folder = data_folder
         self.analysis_folder = analysis_folder
         self.dapi_fls = np.sort(glob.glob(analysis_folder+os.sep+'Segmentation'+os.sep+'*--dapi_segm.npz'))
-    #adding additional method missing: get_XB
-    def get_XB(self,im_,th=3):
-        #im_ = self.im1n
-        std_ = np.std(im_[::5,::5,::5])
-        #im_base = im_[1:-1,1:-1,1:-1]
-        #keep=(im_base>im_[:-2,1:-1,1:-1])&(im_base>im_[1:-1,:-2,1:-1])&(im_base>im_[1:-1,1:-1,:-2])&\
-        #    (im_base>im_[2:,1:-1,1:-1])&(im_base>im_[1:-1,2:,1:-1])&(im_base>im_[1:-1,1:-1,2:])&(im_base>std_*3);#&(im_[:1]>=im_[1:])
-        #XB = np.array(np.where(keep)).T+1
-
-        keep = im_>std_*th
-        XB = np.array(np.where(keep)).T
-        from tqdm import tqdm
-        for delta_fit in tqdm([1,2,3,5,7,10,15]):
-            XI = np.indices([2*delta_fit+1]*3)-delta_fit
-            keep = (np.sum(XI*XI,axis=0)<=(delta_fit*delta_fit))
-            XI = XI[:,keep].T
-            XS = (XB[:,np.newaxis]+XI[np.newaxis])
-            shape = self.sh
-            XS = XS%shape
-
-            keep = im_[tuple(XB.T)]>=np.max(im_[tuple(XS.T)],axis=0)
-            XB = XB[keep]
-        return XB
     def get_fov(self,ifov=10,set_='set1',keepH = ['H'+str(i)+'_' for i in range(1,9)]):
         self.set_ = set_
         self.ifov = ifov
@@ -2102,8 +2095,8 @@ class decoder_simple():
         self.save_folder = save_folder
         self.fov,self.set_ = fov,set_
         save_folder = self.save_folder
-        self.decoded_fl = save_folder+os.sep+'decoded_'+fov.split('.')[0]+'--'+set_+'.npz'
-        self.drift_fl = save_folder+os.sep+'drift_'+fov.split('.')[0]+'--'+set_+'.pkl'
+        self.decoded_fl = save_folder+os.sep+'decodedNew_'+fov.split('.')[0]+'--'+set_+'.npz'
+        self.drift_fl = save_folder+os.sep+'driftNew_'+fov.split('.')[0]+'--'+set_+'.pkl'
     def check_is_complete(self):
         if os.path.exists(self.decoded_fl):
             print("Completed")
@@ -2118,35 +2111,47 @@ class decoder_simple():
         self.drift_fls = glob.glob(self.save_folder+os.sep+'drift_*.pkl')
         self.fov_sets = [os.path.basename(fl).replace('drift_','').replace('.pkl','').split('--')
                          for fl in self.drift_fls]
-    def get_XH(self,fov,set_,ncols=3):
+    def get_XH(self,fov,set_,ncols=3,nbits=16,th_h=0):
         self.set_ = set_
         save_folder = self.save_folder
-        drift_fl = save_folder+os.sep+'drift_'+fov.split('.')[0]+'--'+set_+'.pkl'
-        drifts,all_flds,fov = pickle.load(open(drift_fl,'rb'))
-        self.drifts,self.all_flds,self.fov = drifts,all_flds,fov
+        drift_fl = save_folder+os.sep+'driftNew_'+fov.split('.')[0]+'--'+set_+'.pkl'
+
+        if os.path.exists(drift_fl):
+            drifts,all_flds,fov,fl_ref = pickle.load(open(drift_fl,'rb'))
+            self.drifts,self.all_flds,self.fov,self.fl_ref = drifts,all_flds,fov,fl_ref
+        else:
+            drift_fl = save_folder+os.sep+'driftNew_'+fov.split('.')[0]+'--'+set_+'.pkl'
+            drifts,all_flds,fov = pickle.load(open(drift_fl,'rb'))
+            self.drifts,self.all_flds,self.fov = drifts,all_flds,fov
+
 
         XH = []
         for iH in tqdm(np.arange(len(all_flds))):
-            fld = all_flds[iH]
+            fld = all_flds[iH].strip("/")
             if 'MER' in os.path.basename(fld):
                 for icol in range(ncols):
                     tag = os.path.basename(fld)
                     save_fl = save_folder+os.sep+fov.split('.')[0]+'--'+tag+'--col'+str(icol)+'__Xhfits.npy.npz'
                     if not os.path.exists(save_fl):save_fl = save_fl.replace('.npy','')
-                    Xh = np.load(save_fl)['Xh']
-                    tzxy = drifts[iH][0]
-                    Xh[:,:3]+=tzxy# drift correction
-                    ih = get_iH(fld) # get bit
-                    bit = (ih-1)*3+icol
-                    icolR = np.array([[icol,bit]]*len(Xh))
-                    XH_ = np.concatenate([Xh,icolR],axis=-1)
-                    XH.extend(XH_)
+                    try:
+                        Xh = np.load(save_fl)['Xh']
+                        Xh = Xh[Xh[:,-1]>th_h]
+                        tzxy = drifts[iH][0]
+                        Xh[:,:3]+=tzxy# drift correction
+                        is_low = 'low' in tag
+                        ih = get_iH(fld) # get bit
+                        bit = ((ih-1)%nbits)*ncols+icol+0.5*is_low
+                        icolR = np.array([[icol,bit]]*len(Xh))
+                        XH_ = np.concatenate([Xh,icolR],axis=-1)
+                        XH.extend(XH_)
+                    except:
+                        print("Failed:",save_fl)
         self.XH = np.array(XH)
     def get_inters(self,dinstance_th=2,enforce_color=False):
         """Get an initial intersection of points and save in self.res"""
         res =[]
         if enforce_color:
-            icols = self.XH[:,-2]
+            icols = self.XH[:,-2].astype(int)
             XH = self.XH
             for icol in tqdm(np.unique(icols)):
                 inds = np.where(icols==icol)[0]
@@ -2160,7 +2165,45 @@ class decoder_simple():
             Ts = cKDTree(Xs)
             res = Ts.query_ball_tree(Ts,dinstance_th)
         self.res = res
-        
+    def get_inters(self,nmin_bits=4,dinstance_th=2,enforce_color=True,redo=False,save=False):
+        """Get an initial intersection of points and save in self.res"""
+        self.res_fl = self.decoded_fl.replace('decoded','res')
+        if not os.path.exists(self.res_fl) or redo:
+            
+            res =[]
+            if enforce_color:
+                icols = self.XH[:,-2].astype(int)
+                XH = self.XH
+                for icol in tqdm(np.unique(icols)):
+                    inds = np.where(icols==icol)[0]
+                    Xs = XH[inds,:3]
+                    Ts = cKDTree(Xs)
+                    res_ = Ts.query_ball_tree(Ts,dinstance_th)
+                    res += [inds[r] for r in res_]
+            else:
+                XH = self.XH
+                Xs = XH[:,:3]
+                Ts = cKDTree(Xs)
+                res = Ts.query_ball_tree(Ts,dinstance_th)
+            print("Calculating lengths of clusters...")
+            lens = np.array(list(map(len,res)))
+            Mlen = np.max(lens)
+            print("Unfolding indexes...")
+            res_unfolder = np.concatenate(res)
+            print("Saving to file:",self.res_fl)
+            self.res = res
+            self.res_unfolder=res_unfolder
+            self.lens=lens
+            if save:
+                np.savez(self.res_fl,res_unfolder=res_unfolder,lens=lens)
+        else:
+            dic = np.load(self.res_fl)
+            self.res_unfolder=dic['res_unfolder']
+            self.lens=dic['lens']
+            #self.res = res
+        lens =self.lens
+        self.res_unfolder = self.res_unfolder[np.repeat(lens, lens)>=nmin_bits]
+        self.lens = self.lens[lens>=nmin_bits]    
     def load_library(self,lib_fl = r'Z:\DCBBL1_3_2_2023\MERFISH_Analysis\codebook_0_New_DCBB-300_MERFISH_encoding_2_21_2023.csv',nblanks=-1):
         code_txt = np.array([ln.replace('\n','').split(',') for ln in open(lib_fl,'r') if ',' in ln])
         gns = code_txt[1:,0]
@@ -2208,7 +2251,7 @@ class decoder_simple():
                 if bit not in dic_bit_to_code: dic_bit_to_code[bit]=[]
                 dic_bit_to_code[bit].append(icd)
         self.dic_bit_to_code = dic_bit_to_code  ### a dictinary in which each bit is mapped to the inde of a code
-    def get_icodes(self,nmin_bits=4,method = 'top4',redo=False,norm_brightness=None):    
+    def get_icodes(self,nmin_bits=4,method = 'top4',redo=False,norm_brightness=None,nbits=48,is_unique=True):    
         #### unfold res which is a list of list with clusters of loc.
         
         
@@ -2227,7 +2270,7 @@ class decoder_simple():
         ### get scores across bits
         import time
         start = time.time()
-        RS = self.XH[:,-1].astype(int)
+        RS = self.XH[:,-1].astype(int) #bits
         brighness = self.XH[:,-3]
         brighness_n = brighness.copy()
         if norm_brightness is not None:
@@ -2238,7 +2281,8 @@ class decoder_simple():
         scores = brighness_n[res_unfolder]
        
         bits_unfold = RS[res_unfolder]
-        nbits = len(np.unique(RS))
+        if nbits is None:
+            nbits = len(np.unique(RS))####### might give error
         scores_bits = np.zeros([len(res),nbits])
         arg_scores = np.argsort(scores)
         scores_bits[ires[arg_scores],bits_unfold[arg_scores]]=scores[arg_scores]
@@ -2262,6 +2306,7 @@ class decoder_simple():
             for icd,cd in enumerate(codes_b):
                 icodesN[bcodes_b==cd]=icd
             bad = np.sum(scores_bits>0,axis=-1)<4
+            
             icodesN[bad]=-1
             igood = np.where(icodesN>-1)[0]
             inds_spotsN =  np.zeros([len(res),nbits],dtype=int)-1
@@ -2277,40 +2322,46 @@ class decoder_simple():
             scores_prunedN = np.array([scores_bits[imol][codes[icd]] for imol,icd in enumerate(icodesN) if icd>-1])
 
         print("Computed the decoding:",time.time()-start)
+        
+        if is_unique:
+            import time
+            start = time.time()
 
-        import time
-        start = time.time()
 
-        mean_scores = np.mean(scores_prunedN,axis=-1)
-        ordered_mols = np.argsort(mean_scores)[::-1]
-        keep_mols = []
-        visited = np.zeros(len(self.XH))
-        for imol in tqdm(ordered_mols):
-            r = np.array(res_prunedN[imol])
-            r_ = r[r>=0]
-            if np.all(visited[r_]==0):
-                keep_mols.append(imol)
-                visited[r_]=1
-        keep_mols = np.array(keep_mols)
-        self.scores_prunedN = scores_prunedN[keep_mols]
-        self.res_prunedN = res_prunedN[keep_mols]
-        self.icodesN = icodesN[keep_mols]
-        print("Computed best unique assigment:",time.time()-start)
+            mean_scores = np.mean(scores_prunedN,axis=-1)
+            ordered_mols = np.argsort(mean_scores)[::-1]
+            keep_mols = []
+            visited = np.zeros(len(self.XH))
+            for imol in tqdm(ordered_mols):
+                r = np.array(res_prunedN[imol])
+                r_ = r[r>=0]
+                if np.all(visited[r_]==0):
+                    keep_mols.append(imol)
+                    visited[r_]=1
+            keep_mols = np.array(keep_mols)
+            self.scores_prunedN = scores_prunedN[keep_mols]
+            self.res_prunedN = res_prunedN[keep_mols]
+            self.icodesN = icodesN[keep_mols]
+            print("Computed best unique assigment:",time.time()-start)
         
         XH_pruned = self.XH[self.res_prunedN]
         self.XH_pruned = XH_pruned#self.XH[self.res_prunedN]
-        np.savez_compressed(self.decoded_fl,XH_pruned=XH_pruned,icodesN=self.icodesN,gns_names = np.array(self.gns_names))
+        np.savez_compressed(self.decoded_fl,XH_pruned=XH_pruned,icodesN=self.icodesN,gns_names = np.array(self.gns_names),is_unique=is_unique)
         #XH_pruned -> 10000000 X 4 X 10 [z,x,y,bk...,corpsf,h,col,bit] 
         #icodesN -> 10000000 index of the decoded molecules in gns_names
         #gns_names
     def load_decoded(self):
         import time
         start= time.time()
-        self.decoded_fl = self.save_folder+os.sep+'decoded_'+self.fov.split('.')[0]+'--'+self.set_+'.npz'
-        self.XH_pruned = np.load(self.decoded_fl)['XH_pruned']
-        self.icodesN = np.load(self.decoded_fl)['icodesN']
-        self.gns_names = np.load(self.decoded_fl)['gns_names']
-        print("Loaded decoded:",start-time.time())
+        self.decoded_fl = self.save_folder+os.sep+'decodedNew_'+self.fov.split('.')[0]+'--'+self.set_+'.npz'
+        if os.path.exists(self.decoded_fl):
+            self.XH_pruned = np.load(self.decoded_fl)['XH_pruned']
+            self.icodesN = np.load(self.decoded_fl)['icodesN']
+            self.gns_names = np.load(self.decoded_fl)['gns_names']
+            #print("Loaded decoded:",start-time.time())
+            return True
+        else:
+            return False
     def get_is_bright(self,th_dic = {0:1500,1:1500,2:750},get_stats=True):
         self.th_dic = th_dic
         gns_names,icodesN,XH_pruned = self.gns_names,self.icodesN,self.XH_pruned
@@ -2388,6 +2439,7 @@ def apply_fine_drift(dec,plt_val=True,npts=50000):
     bad_igns = [ign for ign,gn in enumerate(dec.gns_names) if 'blank' in gn.lower()]
     good_igns = [ign for ign,gn in enumerate(dec.gns_names) if 'blank' not in gn.lower()]
     is_good_gn = np.in1d(dec.icodesN,good_igns)
+    allR = dec.XH_pruned[:,:,-1].astype(int)
     XHG = dec.XH_pruned[is_good_gn]
     
     RG = XHG[:,:,-1].astype(int)
@@ -2405,7 +2457,9 @@ def apply_fine_drift(dec,plt_val=True,npts=50000):
         XHFinR[(RF==iR)]=np.nan
         drift = np.mean(np.nanmean(XHFiR[:,:,:3],axis=1)-np.nanmean(XHFinR[:,:,:3],axis=1),axis=0)
         dic_fine_drift[iR]=drift
-    drift_arr = np.array([dic_fine_drift[iR] for iR in iRs])
+    drift_arr = np.zeros([np.max(allR)+1,3])
+    for iR in iRs:
+        drift_arr[iR]=dic_fine_drift[iR]
     if plt_val:
         ncols = len(np.unique(XHG[:,:,-2]))
         X1 = np.array([dic_fine_drift[iR] for iR in iRs[0::ncols]])
@@ -2422,6 +2476,7 @@ def apply_fine_drift(dec,plt_val=True,npts=50000):
     dec.drift_arr = drift_arr
     R = dec.XH_pruned[:,:,-1].astype(int)#
     dec.XH_pruned[:,:,:3] -= drift_arr[R]
+
 def apply_brightness_correction(dec,plt_val=True,npts=50000):
     bad_igns = [ign for ign,gn in enumerate(dec.gns_names) if 'blank' in gn.lower()]
     good_igns = [ign for ign,gn in enumerate(dec.gns_names) if 'blank' not in gn.lower()]
@@ -2466,8 +2521,7 @@ def get_score_per_color(dec):
     score = np.array([H,-D]).T
     score = np.sort(score,axis=0)
     return [score[dec.XH_pruned[:,0,-2]==icol] for icol in np.arange(dec.ncols)]
-    
-def get_score_withRef(dec,scoresRef,plt_val=False,gene=None,iSs=None):
+def get_score_withRef(dec,scoresRef,plt_val=False,gene=None,iSs=None,th_min=-np.inf):
     H = np.median(dec.XH_pruned[...,-3],axis=1)
     D = dec.XH_pruned[...,:3]-np.mean(dec.XH_pruned[...,:3],axis=1)[:,np.newaxis]
     D = np.mean(np.linalg.norm(D,axis=-1),axis=-1)
@@ -2491,44 +2545,30 @@ def get_score_withRef(dec,scoresRef,plt_val=False,gene=None,iSs=None):
         is_good_gn = np.in1d(dec.icodesN,good_igns)
         
         plt.figure()
-        plt.hist(scoreA[is_good_gn],density=True,bins=100,alpha=0.5,label='all genes')
+        kp = scoreA>th_min
+        plt.hist(scoreA[(is_good_gn)&kp],density=True,bins=100,alpha=0.5,label='all genes')
         if gene is not None:
             is_gn = dec.icodesN==(list(dec.gns_names).index(gene))
-            plt.hist(scoreA[is_gn],density=True,bins=100,alpha=0.5,label=gene)
-        plt.hist(scoreA[~is_good_gn],density=True,bins=100,alpha=0.5,label='blanks');
+            plt.hist(scoreA[(is_gn)&kp],density=True,bins=100,alpha=0.5,label=gene)
+        plt.hist(scoreA[(~is_good_gn)&kp],density=True,bins=100,alpha=0.5,label='blanks');
         plt.legend()
-def get_scores(dec,plt_val=True,gene='Ptbp1'):
-    H = np.median(dec.XH_pruned[...,4],axis=1)
-    Hd = np.std(dec.XH_pruned[...,4],axis=1)/H
-    D = dec.XH_pruned[...,:3]-np.mean(dec.XH_pruned[...,:3],axis=1)[:,np.newaxis]
-    D = np.mean(np.linalg.norm(D,axis=-1),axis=-1)
-    score = np.array([H,-D])
-    scoreA = np.argsort(np.argsort(score,axis=-1),axis=-1)+1
-    scoreA = np.sum(np.log(scoreA)-np.log(len(D)),axis=0)
-    dec.scoreA = scoreA
-    if plt_val:
-        bad_igns = [ign for ign,gn in enumerate(dec.gns_names) if 'blank' in gn.lower()]
-        good_igns = [ign for ign,gn in enumerate(dec.gns_names) if 'blank' not in gn.lower()]
-        is_good_gn = np.in1d(dec.icodesN,good_igns)
-        
-        plt.figure()
-        plt.hist(scoreA[is_good_gn],density=True,bins=100,alpha=0.5,label='all genes')
-        if gene is not None:
-            is_gn = dec.icodesN==(list(dec.gns_names).index(gene))
-            plt.hist(scoreA[is_gn],density=True,bins=100,alpha=0.5,label=gene)
-        plt.hist(scoreA[~is_good_gn],density=True,bins=100,alpha=0.5,label='blanks');
-        plt.legend()
-        
-def load_segmentation(dec,nexpand=5):
-    dec.fl_dapi = glob.glob(dec.save_folder+os.sep+'Segmentation'+os.sep+dec.fov+'*'+dec.set_+'*.npz')[0]
+def load_segmentation(dec):
+    fls_ =  glob.glob(dec.save_folder+os.sep+'Segmentation'+os.sep+dec.fov+'*'+dec.set_+'*.npz')
+    if len(fls_)==0:
+        return 0
+    dec.fl_dapi =fls_[0]
+    #dec.fl_dapi = glob.glob(dec.save_folder+os.sep+'Segmentation'+os.sep+dec.fov+'*'+dec.set_+'*.npz')[0]
     dic = np.load(dec.fl_dapi)
     im_segm = dic['segm']
     dec.shape = dic['shape']
-    dec.im_segm_=stitch3D(im_segm,niter=5,th_int=0.75)
-    dec.im_segm_ = expand_segmentation(dec.im_segm_,nexpand=nexpand)
+    dec.im_segm_=stitch3d_new(im_segm,minsz = 200,maxsz = 1000,th_int=0.66,th_cover=0.8,th_max_subcell=0.66,nexpand = 5)
+    #dec.im_segm_ = expand_segmentation(dec.im_segm_,nexpand=nexpand)
     drift_fl = dec.save_folder+os.sep+'drift_'+dec.fov+'--'+dec.set_+'.pkl'
     drifts,fls,fov = pickle.load(open(drift_fl,'rb'))
+    dec.fls_drifts = fls
     dec.drifts = np.array([drft[0]for drft in drifts])
+    dec.fld_ref = dec.fls_drifts[np.argmin([np.sum(np.abs(drft[0]))for drft in dec.drifts])]
+    dec.fl_ref = dec.fld_ref+os.sep+dec.fov.replace('.zarr','')+'.zarr'
     dec.drifts = drifts
     tag_dapi = os.path.basename(dec.fl_dapi).split('--')[1]
     tags_drifts = [os.path.basename(fld)for fld in fls]
@@ -2622,12 +2662,26 @@ def load_GFP(dec,th_cor=0.25,th_h=2000,th_d=2,plt_val=True):
         viewer=plot_points_direct(dec.Xh2GFP,gene='GFP',color=[0,0.5,0],minsz=0,maxsz=20,percentage_max = 95,viewer=viewer);
         return viewer
         
-def get_cell_id(dec,Xh):
+def get_cell_id_old(dec,Xh):
+    if not hasattr(dec,'drift'): 
+        good = np.ones(len(Xh),dtype=bool)
+        cells_ = np.zeros(len(Xh),dtype=int)
+        return cells_,good
     tzxy = dec.drift[0]#dec.drift_dapi
     im_segm = dec.im_segm_
     dec.shapesm = dec.im_segm_.shape
     
     Xcms = Xh[:,:3]-tzxy#?
+    Xred = np.round((Xcms/dec.shape)*dec.shapesm).astype(int)
+    good = ~np.any((Xred>=dec.shapesm)|(Xred<0),axis=-1)
+    Xred = Xred[good]
+    return im_segm[tuple(Xred.T)],good
+
+def get_cell_id(dec,Xh):
+    im_segm = dec.im_segm_
+    dec.shapesm = dec.im_segm_.shape
+    
+    Xcms = Xh[:,:3]
     Xred = np.round((Xcms/dec.shape)*dec.shapesm).astype(int)
     good = ~np.any((Xred>=dec.shapesm)|(Xred<0),axis=-1)
     Xred = Xred[good]
@@ -2710,7 +2764,10 @@ def apply_flat_field(dec,tag='med_col_raw'):
     save_folder=dec.save_folder#r'\\192.168.0.10\bbfishdc13\DCBBL1_3_2_2023\MERFISH_Analysis'
     immeds = []
     for icol in range(dec.ncols):
-        dic = np.load(save_folder+os.sep+tag+str(icol)+'.npz')
+        fl_med = save_folder+os.sep+tag+str(icol)+'.npz'
+        if not os.path.exists(fl_med):
+            fl_med = fl_med.replace('_raw','')
+        dic = np.load(fl_med)
         immed,resc=dic['im'],dic['resc']
         immeds.append(immed)
     dec.immeds = np.array(immeds)
@@ -2723,7 +2780,7 @@ def apply_flat_field(dec,tag='med_col_raw'):
     for icol in range(dec.ncols):
         keep = Icol==icol
         immed = dec.immeds[icol].copy()
-        immed = immed/np.median(immed)
+        immed = immed/np.nanmedian(immed)
         x_,y_ = ((XH[keep][:,1:3]/dec.resc).astype(int)%immed.shape).T
         norm_ = immed[x_,y_] 
         H[keep]=H[keep]/norm_
@@ -2808,30 +2865,30 @@ def plot_statistics(dec):
     plt.title(str(np.round(np.mean(ncds[~kp])/np.mean(ncds[kp]),3)))
     plt.legend()
 def get_xyfov(dec):
-    drifts,fls,fov = pickle.load(open(dec.drift_fl,'rb'))
+    drifts,fls,fov,_ = pickle.load(open(dec.drift_fl,'rb'))
     fl = fls[0]+os.sep+dec.fov.split('.')[0]+'.xml'
     txt = open(fl,'r').read()
     dec.xfov,dec.yfov = eval(txt.split('<stage_position type="custom">')[-1].split('<')[0])
-def save_final_decoding(save_folder,fov,set_,scoresRef,th=-1.5,plt_val=False,
-                        tags_smFISH=['Aldh','Sox11'],
-                        genes_smFISH=[['Igfbpl1','Aldh1l1','Ptbp1'],['Sox11','Sox2','Dcx']],Hths=None,force=False):
+    
+def save_final_decoding(save_folder,fov,scoresRef,set_='',th=-1.5,ncols=3,
+                        tag_save = 'finaldecs_',
+                        plt_val=False,
+                        force=False,try_mode=True):
     """
     This loads the decoded points renormalizes them and picks the most confident points
     """
     if type(scoresRef) is str: scoresRef = np.load(scoresRef,allow_pickle=True)
     dec = decoder_simple(save_folder,fov,set_)
-    save_fl = dec.save_folder+os.sep+os.sep+'finaldecs_'+dec.fov.split('.')[0]+'--'+dec.set_+'.npz'
+    save_fl = dec.save_folder+os.sep+os.sep+tag_save+dec.fov.split('.')[0]+'--'+dec.set_+'.npz'
     if not os.path.exists(save_fl) or force:
-        #print(dec.fov,dec.set_)
-        try:
-            load_segmentation(dec)
-            dec.load_decoded()
-            apply_flat_field(dec)
-            apply_fine_drift(dec,plt_val=plt_val)
+        print(dec.fov,dec.set_)
+        def main_subf(dec,save_fl,save_folder,fov,set_,scoresRef,th,ncols,plt_val,force):
             
-            #for i in range(3):
-            #    apply_brightness_correction(dec)
-            #get_scores(dec,plt_val=plt_val)
+            loaded = dec.load_decoded()
+            if not loaded:
+                print(save_fl, "Did not have a valid decoded file.")
+                return None
+            dec.ncols=ncols
             get_score_withRef(dec,scoresRef,plt_val=plt_val,gene=None,iSs = None)
             dec.th=th
             #plot_1gene(dec,gene='Gad1',viewer = None)
@@ -2848,54 +2905,51 @@ def save_final_decoding(save_folder,fov,set_,scoresRef,th=-1.5,plt_val=False,
             icodesf = dec.icodesN[keepf]
             XHfpr = dec.XH_pruned[keepf]
             XHf = np.mean(XHfpr,axis=1)
-            if Hths is None:
-                ICol = XHfpr[:,:,-2].astype(int)
-                Hths = [np.percentile(XHfpr[ICol==icol][:,-3],15) for icol in np.unique(ICol)]
             
-            ### deal with smFISH
-            for tag_smFISH,gns_smFISH in zip(tags_smFISH,genes_smFISH):
-                dec.get_XH_tag(tag=tag_smFISH)#dec.get_XH_tag(tag='Aldh1')
-                Xh = norm_brightness(dec,dec.Xh)
-                tags = [gn+'_smFISH' for gn in gns_smFISH]#['Igfbp_smFISH','Aldh1l1_smFISH','Ptbp1_smFISH']
-                XF = XHf[:,[0,1,2,-5,-4,-3,-2,-1,-1,-1,-1]]
-                #zc,xc,yc,bk-7,a-6,habs-5,hn-4,h-3
-                XF[:,-1] = dec.scoreA[keepf]
-                XF[:,-2] = np.where(keepf)[0]
-                mnD = np.mean(np.linalg.norm((XHf[:,np.newaxis]-XHfpr)[:,:,:3],axis=-1),axis=-1)
-                XF[:,-3]=mnD
-                mnH = np.mean(np.abs((XHf[:,np.newaxis]-XHfpr)[:,:,-3]),axis=-1)
-                XF[:,-4]=mnH
-                genesf = dec.gns_names[icodesf]
+            XF = XHf[:,[0,1,2,-5,-4,-3,-2,-1,-1,-1,-1]]
+            #zc,xc,yc,abscorrwithpsf-6,absbrightness-5,correlation with psf-4,brightness-3,color-2,averagebit-1 in XHf
+            XF[:,-1] = dec.scoreA[keepf] 
+            XF[:,-2] = np.where(keepf)[0]
+            mnD = np.mean(np.linalg.norm((XHf[:,np.newaxis]-XHfpr)[:,:,:3],axis=-1),axis=-1)
+            XF[:,-3]=mnD
+            mnH = np.mean(np.abs((XHf[:,np.newaxis]-XHfpr)[:,:,-3]),axis=-1)
+            XF[:,-4]=mnH
+            genesf = dec.gns_names[icodesf]
 
-                for icol,tag in enumerate(tags):
-                    Xh_ = Xh[Xh[:,-2]==icol]
-                    Xh_=Xh_[Xh_[:,-3]>Hths[icol]]
-                    Xh_=Xh_[:,[0,1,2,-5,-4,-3,-2,-1,-1,-1,-1]]
-                    Xh_[:,-1]=0
-                    Xh_[:,-2]=-1
-                    Xh_[:,-3]=0
-                    Xh_[:,-4]=0
-                    XF = np.concatenate([XF,Xh_])
-                    genesf = np.concatenate([genesf,[tag]*len(Xh_)])
-
-            cell_id,good = get_cell_id(dec,XF)
-            XF_ = np.concatenate([XF[good],cell_id[:,np.newaxis]],axis=-1)
-            genesf_ = genesf[good]
-            iset = int(dec.set_.split('_set')[-1])
+            if True:
+                nsegm = load_segmentation(dec)
+                cell_id,good = get_cell_id(dec,XF)
+                #good &= (XF[:, 1] > 50) & (XF[:, 1] < 1998)
+                #good &= (XF[:, 2] > 50) & (XF[:, 2] < 1998)
+                XF_ = np.concatenate([XF[good],cell_id[:,np.newaxis]],axis=-1)
+                genesf_ = genesf[good]
+                iset = 0#int(dec.set_.split('_set')[-1])
+                
+                isets = np.array([iset]*len(cell_id))[:,np.newaxis]
+                
+                cell_id = cell_id[:,np.newaxis]
+            else:
+                XF_ = XF
+                genesf_ = genesf
+                good = np.array([1]*len(XF_))
+                isets = np.array([0]*len(XF_))[:,np.newaxis]
+                cell_id = np.array([0]*len(XF_))[:,np.newaxis]
             ifov = int(dec.fov.split('_')[-1].split('.')[0])
-            isets = np.array([iset]*len(cell_id))[:,np.newaxis]
-            ifovs = np.array([ifov]*len(cell_id))[:,np.newaxis]
-            cell_id = cell_id[:,np.newaxis]
-            XF_ = np.concatenate([XF[good],cell_id,ifovs,isets],axis=-1)
+            ifovs = np.array([ifov]*len(XF_))[:,np.newaxis]
+            
+
+            XF_ = np.concatenate([XF_,cell_id,ifovs,isets],axis=-1)
 
             get_xyfov(dec)
             XF_ = XF_[:,list(np.arange(XF_.shape[-1]))+[-1,-1]]
             XF_[:,-2:]=dec.xfov,dec.yfov
             header = ['z','x','y','abs_brightness','cor','brightness','color','mean_bightness_variation','mean_distance_variation',
                       'index_from_XH_pruned','score','cell_id','ifov','iset','xfov','yfov']
+            
+            if not hasattr(dec,'im_segm_'): dec.im_segm_=np.zeros(np.array([30,3000,3000])//4)
             icells,vols = np.unique(dec.im_segm_,return_counts=True)
             cms = np.array(ndimage.center_of_mass(np.ones_like(dec.im_segm_),dec.im_segm_,icells))
-            icells,vols = np.unique(dec.im_segm_,return_counts=True)
+            #icells,vols = np.unique(dec.im_segm_,return_counts=True)
             cms = np.array(ndimage.center_of_mass(np.ones_like(dec.im_segm_),dec.im_segm_,icells))
             cellinfo = cms[:,[0,0,0,1,2,0,0]]
             cellinfo[:,0]=icells
@@ -2905,41 +2959,53 @@ def save_final_decoding(save_folder,fov,set_,scoresRef,th=-1.5,plt_val=False,
 
             np.savez_compressed(save_fl,XF=XF_.astype(np.float32),
                                 genes = genesf_,cellinfo=cellinfo.astype(np.float32),header_cells=header_cells,header=header)
-        except:
-            print("Failed",dec.fov,dec.set_)
-            
-            
-def plot_gene_mosaic_cells(df,cell_df,gene,plt_fov=False,pixel_size = 0.10833*4):
+        if try_mode:
+            try:
+                main_subf(dec,save_fl,save_folder,fov,set_,scoresRef,th,ncols,plt_val,apply_flat,tags_smFISH,genes_smFISH,Hths,force)
+            except:
+                print("Failed",dec.fov,dec.set_)
+        else:
+            main_subf(dec,save_fl,save_folder,fov,set_,scoresRef,th,ncols,plt_val,force)
+    
+          
+def plot_gene_mosaic_cells(df,cell_df,gene,plt_fov=False,pixel_size = 0.10833*4,th_blank=0.5,
+                           transpose=1,flipx=1,flipy=1,sz_min=1,sz_max=30,nmax=20):
     xcells = cell_df['xc']*pixel_size+cell_df['yfov']
     ycells = cell_df['yc']*pixel_size-cell_df['xfov']
-    Xcells = np.array([xcells,ycells]).T
+
+    Xcells = np.array([xcells*flipx,ycells*flipy][::transpose]).T
     
     cts = np.array(df[gene])#Ptbp1_smFISH
+    
     cts[np.isnan(cts)]=0
-    ncts = np.clip(cts/20,0,1)
-    size = 5+ncts*10
+    ncts = np.clip(cts/nmax,0,1)
+    size = sz_min+ncts*(sz_max-sz_min)
     from matplotlib import cm as cmap
     cols = cmap.coolwarm(ncts)
     import napari
     good_cells = slice(None)
+    
+    
+    blanks = [gn for gn in df.columns if 'blank' in gn]
+    blanks_cts = np.nanmean(df[blanks],axis=-1)
+    good_cells = blanks_cts<th_blank
+    
     XC = -Xcells[good_cells,::-1]
-    viewer = napari.view_points(XC,size=size,face_color=cols[good_cells],name=gene)
+    viewer = napari.view_points(XC,size=size[good_cells],face_color=cols[good_cells],name=gene)
     if plt_fov:
         ifovs = np.array(list(df.index),dtype=int)//10**5
         ifov_unk = np.unique(ifovs)
         Xfov = np.array([np.mean(XC[ifovs==ifov],axis=0)for ifov in ifov_unk])
         features =  {'fov':ifov_unk}
         text = {
-            'string': '{fov:.1f}',
+            'string': '{fov}',
             'size': 20,
             'color': 'gray',
             'translation': np.array([0, 0]),
         }
-        viewer.add_points(Xfov,text=text,features=features)
-def compute_flat_field_raw(data_fld,
-            save_folder =r'\\192.168.0.6\bbfish1e3\DCBBL1_03_14_2023_big\MERFISH_Analysis',
-            tag='microscope',
-            ncols=4):
+        viewer.add_points(Xfov,text=text,features=features,edge_width=0,edge_color=[0,0,0,0])
+    return viewer
+def compute_flat_field_raw(data_fld,tag="",save_folder =r'\\192.168.0.6\bbfish1e3\DCBBL1_03_14_2023_big\MERFISH_Analysis',ncols=4):
     zarrs = glob.glob(data_fld+os.sep+'*.zarr')
     for icol in range(ncols):
         ims_ = [np.array(read_im(fl)[icol][10],dtype=np.float32) for fl in tqdm(zarrs)]
@@ -3003,70 +3069,314 @@ def get_psf(im_,th=1000,th_cor = 0.75,delta=3,delta_fit = 7,sxyzP = [15,30,30]):
             F = torch.fft.fftn(ims,dim=[0,1,2])
             psf = torch.mean(torch.fft.ifftn(F*expK,dim=[0,1,2]).real,-1)
             return psf.cpu().detach().numpy()
-def full_deconv(im_,s_=500,pad=100,psf=None,parameters={'method': 'wiener', 'beta': 0.001, 'niter': 50},gpu=True,force=False):
-    im0=np.zeros_like(im_)
-    sx,sy = im_.shape[1:]
-    ixys = []
-    for ix in np.arange(0,sx,s_):
-        for iy in np.arange(0,sy,s_):
-            ixys.append([ix,iy])
+            
+            
+        
+def get_connected_cells(im1,im2,th_int = 0.5):
+    im1_ = np.array(im1,dtype=int)
+    N1max = np.max(im1)+1
+    im2_ = (np.array(im2,dtype=int))*N1max
     
-    for ix,iy in tqdm(ixys):#ixys:#tqdm(ixys):
-        imsm = im_[:,ix:ix+pad+s_,iy:iy+pad+s_]
-        imt = apply_deconv(imsm,psf=psf,parameters=parameters,gpu=gpu,plt_val=False,force=force)
-        start_x = ix+pad//2 if ix>0 else 0
-        end_x = ix+pad//2+s_
-        start_y = iy+pad//2 if iy>0 else 0
-        end_y = iy+pad//2+s_
-        #print(start_x,end_x,start_y,end_y)
-        im0[:,start_x:end_x,start_y:end_y] = imt[:,(start_x-ix):(end_x-ix),(start_y-iy):(end_y-iy)]
-    return im0
-###added fine_drift
-class fine_drift:
-    def __init__(self,fl_ref,fl,verbose=True,sz_block=600):
-        self.sz_block=sz_block
-        self.verbose=verbose
-        self.fl,self.fl_ref='',''
-        self.get_drift(fl_ref,fl)
-        
-    def get_drift(self,fl_ref,fl):
-        if fl_ref!=self.fl_ref:
-            if self.verbose: print("Loading:",fl_ref)
-            self.im_ref = self.load_im(fl_ref)
-            if self.verbose: print("Finding markers...")
-            self.XB1_minus,self.XB1_plus = self.get_X_plus_minus(self.im_ref)
-            self.fl_ref = fl_ref
-        if fl!=self.fl:
-            if self.verbose: print("Loading:",fl)
-            self.im = self.load_im(fl)
-            if self.verbose: print("Finding markers...")
-            self.XB2_minus,self.XB2_plus = self.get_X_plus_minus(self.im)
-            if self.verbose: print("Finding rough drift...")
-            self.drift = get_txyz(self.im_ref,self.im,sz_norm=30,sz=self.sz_block)
-            self.exp_drift = self.drift[0]
-            if self.verbose: print("Finding fine drift...")
-            self.drft_minus,self.pair_minus = get_best_drift(self.XB1_minus,self.XB2_minus,self.exp_drift,5)
-            self.drft_plus,self.pair_plus = get_best_drift(self.XB1_plus,self.XB2_plus,self.exp_drift,5)
-            self.fl = fl
-        return self.drft_plus,self.pair_plus,self.drft_minus,self.pair_minus
-            
-            
-    def load_im(self,fl):
-        return np.array(read_im(fl)[-1],dtype=np.float32)
-        
-    def get_X_plus_minus(self,im1):
-        #load dapi
-        im1n = normalize_ims(im1,zm=30,zM=60)
-        XB1 = get_XB(-im1n,th=2.5)
-        XB1_minus = get_max_min(XB1,-im1n,delta_fit=7,ismax=True,return_ims=False)
-        XB1 = get_XB(im1n,th=2.5)
-        XB1_plus = get_max_min(XB1,im1n,delta_fit=7,ismax=True,return_ims=False)
-        return XB1_minus,XB1_plus
-#added additional method missing normalize_ims
+    c1,cts1 = np.unique(im1_,return_counts=True)
+    dic_c1 = {c_:ct_ for c_,ct_ in zip(c1,cts1)}
+    c2,cts2 = np.unique(im2_,return_counts=True)
+    dic_c2 = {c_:ct_ for c_,ct_ in zip(c2,cts2)}
+
+    iint,cts = np.unique(im1_+im2_,return_counts=True)
+    dic_int = {}
+    for iint_,ct in zip(iint,cts):
+        c1 = iint_%N1max
+        c2 = iint_-c1
+        c2_ = c2//N1max
+        if c1>0 and c2>0:
+            dic_int[(c1,c2_)]=(ct/dic_c1[c1],ct/dic_c2[c2])
+    edges = []
+    dic_covered1,dic_covered2 = {},{}
+    for (c1,c2) in dic_int:
+        ic1,ic2 = dic_int[(c1,c2)]
+        if ic1>th_int or ic2>th_int:
+            start = dic_covered1.get(c1,[0,0,0])
+            dic_covered1[c1] = [start[0]+ic1,max(start[1],ic1),start[2]+1]
+            start = dic_covered2.get(c2,[0,0,0])
+            dic_covered2[c2] = [start[0]+ic2,max(start[1],ic2),start[2]+1]
+            edges.append((c1,c2))
+    return edges,dic_covered1,dic_covered2
+import networkx as nx
+def get_connected_components(im_segm,th_int=0.75):
+    graph = nx.Graph()
+    for iim in np.arange(len(im_segm)):
+        edges = [((c1,iim),(c1,iim))for c1 in np.unique(im_segm[iim]) if c1>0]
+        graph.add_edges_from(edges)
+    for iim in np.arange(len(im_segm)-1):
+        edges,_,_ = get_connected_cells(im_segm[iim],im_segm[iim+1],th_int = th_int)
+        edges = [((c1,iim),(c2,iim+1))for c1,c2 in edges]
+        graph.add_edges_from(edges)
+    components = list(nx.connected_components(graph))
+    return components
+def stitch3d(im_segm,th_int=0.75):
+    im_segm_ = im_segm.copy()
+    components = get_connected_components(im_segm_,th_int=th_int)
+    dic_nue = {cell:(ic+1) for ic,c in enumerate(components) for cell in c}
+    nue = list(dic_nue.keys())
+    nuear = np.array(nue)
+    for ifr in np.arange(len(im_segm_)):
+        cells_fr = nuear[nuear[:,-1]==ifr,0]
+        cells_to = [dic_nue[(c,ifr)] for c in cells_fr]
+        im_rep = im_segm_[ifr].copy()
+        buckets = np.zeros(np.max(cells_fr)+1,dtype=int)
+        buckets[cells_fr]=cells_to
+        im_segm_[ifr] = buckets[im_segm_[ifr]]
+    return im_segm_
+def get_im_segm_u(im_segm):
+    im_segm_u = np.array(im_segm,dtype=int)
+    for ifr in np.arange(1,len(im_segm_u)):
+        im_segm_u[ifr]=im_segm_u[ifr]+(np.max(im_segm_u[ifr-1])+1)
+    im_segm_u[im_segm==0]=0
+    return im_segm_u
+def replace_mat(mat,vals_fr,vals_to):
+    if len(vals_fr)>0:
+        vmax = np.max(mat)+1
+        vals = np.arange(vmax)
+        vals[vals_fr]=vals_to
+        return vals[mat]
+    return mat
+def get_over_segmented_cells(dic_covered,th_cover = 0.8, th_max_subcell = 0.75):
+    keys = np.array(list(dic_covered.keys()))
+    vals = np.array(list(dic_covered.values()))
+    remove_cells = []
+    if len(vals)>0:
+        remove_cells = keys[(vals[:,-1]>1)&(vals[:,0]>th_cover)&(vals[:,1]<th_max_subcell)]
+    return remove_cells
+
+def stitch3d_new(im_segm,minsz = 600/3,maxsz=600*3,th_int=0.75,th_cover=0.8,th_max_subcell=0.66,nexpand = 5):
+    im_segm_u = get_im_segm_u(im_segm)
+    vols = nd.sum(im_segm_u>0,im_segm_u,np.unique(im_segm_u))
+    remove_cells = np.array(list(np.where(vols<minsz)[0])+list(np.where(vols>maxsz)[0]))
+    im_segm_u = replace_mat(im_segm_u,remove_cells,0)
+    ### remove cells that seem too large
+    remove_cells=[]
+    for delta in [1,2,3]:
+        for ifr in np.arange(len(im_segm_u)-delta):
+            edges,dic_covered1,dic_covered2= get_connected_cells(im_segm_u[ifr],im_segm_u[ifr+delta],th_int=th_int)
+            dic_covered1.update(dic_covered2)
+            remove_cells_ = get_over_segmented_cells(dic_covered1,th_cover = th_cover, th_max_subcell = th_max_subcell)
+            remove_cells.extend(remove_cells_)
+    remove_cells = np.unique(remove_cells)
+    im_segm_u_ = im_segm_u
+    if len(remove_cells):
+        im_segm_u_ = replace_mat(im_segm_u,remove_cells,0)
+    #im_segm_u_exp = expand_segmentation(im_segm_u_,nexpand=5)
+
+    ### stitch things
+    edges_all = []
+    for delta in [1,2,3]:
+        for ifr in np.arange(len(im_segm_u_)-delta):
+            edges,dic_covered1,dic_covered2= get_connected_cells(im_segm_u_[ifr],im_segm_u_[ifr+delta],th_int=0.75)
+            edges_all.extend(edges)
+    ucells = np.unique(im_segm_u_)
+    for ucell in ucells:
+        if ucell>0:
+            edges_all.append((ucell,ucell))
+    graph = nx.Graph()
+    graph.add_edges_from(edges_all)
+    components = list(nx.connected_components(graph))
+    im_segm_u__ = im_segm_u_
+    if len(components)>0:
+        cfr,cto = zip(*[(c,ic+1) for ic,cs in enumerate(components) for c in cs])
+        im_segm_u__ = replace_mat(im_segm_u_,np.array(cfr),np.array(cto))
+    
+    im_segm_u_exp = expand_segmentation(im_segm_u__,nexpand=nexpand)
+    return im_segm_u_exp
+
+def new_segmentation(fl =r'\\192.168.0.100\bbfish100\DCBBL1_4week_6_2_2023\H1_MER_set1\Conv_zscan__030.zarr',
+                     psf_file = '\\\\192.168.0.100\\bbfish100\\DCBBL1_4week_6_2_2023\\MERFISH_Analysis\\psf_750_Scope3_final.npy',
+                     p1=-500,p99=1500,mean_dapi = None,sdapi = 100,
+                    save_folder = r'\\192.168.0.100\bbfish100\DCBBL1_4week_6_2_2023\MERFISH_Analysis',redo=False,plt_val=False):
+
+    segm_folder = save_folder+os.sep+'Segmentation'
+    if not os.path.exists(segm_folder): os.makedirs(segm_folder)
+    fl_dapi = fl
+    save_fl  = segm_folder+os.sep+os.path.basename(fl_dapi).split('.')[0]+'--'+os.path.basename(os.path.dirname(fl_dapi))+'--dapi_segm.npz'
+    if redo or (not os.path.exists(save_fl)):
+    
+        im = read_im(fl)
+        im_dapi = np.array(im[-1],dtype=np.float32)
+        imd = im_dapi
+        if psf_file is not None:
+            psf = np.load(psf_file)
+            imd = full_deconv(im_dapi,s_=500,pad=100,psf=psf,parameters={'method': 'wiener', 'beta': 0.01},gpu=True,force=False)
+        im_dapi_ = norm_slice(imd,s=sdapi)
+
+
+        img = np.array(np.clip((im_dapi_[::3,::4,::4]-p1)/(p99-p1),0,1),dtype=np.float32)
+        imd_ = imd[::3,::4,::4]
+
+        from cellpose import models, io,utils
+        from scipy import ndimage
+        model = models.Cellpose(gpu=True, model_type='cyto')
+        masks, flows, styles, diams = model.eval(img,z_axis=0, diameter=20, channels=[0,0],
+                                                 flow_threshold=-10,cellprob_threshold=-10,normalize=False,
+                                                 do_3D=False,stitch_threshold=0.,
+                                                 progress=True)
+
+        for ifr in range(len(masks)):
+            means = nd.mean(np.clip(imd_[ifr],0,np.max(imd_[ifr])),masks[ifr],np.unique(masks[ifr]))
+            st = 5
+            if mean_dapi is None: mean_dapi = (st*means[0]+np.median(means[1:]))/(st+1)
+            bad_cells = np.where(means<mean_dapi)[0]
+            masks[ifr] = replace_mat(masks[ifr],bad_cells,0)
+        if plt_val:
+            import napari
+            v = napari.view_image(img)
+            v.add_labels(masks)
+        shape = np.array(im[-1].shape)
+        np.savez_compressed(save_fl,segm = masks,shape = shape)
+    return save_fl
+def check_image(dec,tag = '_MER'):
+    drifts,flds,fov_ = np.load(dec.drift_fl,allow_pickle=True)
+    dec.drifts,dec.flds,dec.fov_ = drifts,flds,fov_
+    print("Found files for fov:",fov_,flds)
+    if True:
+        #fld_ = [fld for fld in flds if tag in os.path.basename(fld)][0]
+        from dask import array as da
+        im  = da.concatenate([da.roll(read_im(fld_+os.sep+fov_),drft[0],axis=[1,2,3])[np.newaxis]for fld_,drft in zip(flds,drifts)
+                                                                         if tag in os.path.basename(fld_)])
+    else:
+        fld_ = [fld for fld in flds if tag in os.path.basename(fld)][0]
+        im  = read_im(fld_+os.sep+fov_)
+    import napari
+    v = napari.view_image(im)
+    return v
+def keep_best_N_for_each_Readout(dec,Nkeep = 15000,iH=-4):
+    if not hasattr(dec,'XH_save'):
+        dec.XH_save = dec.XH.copy()
+    dec.XH = dec.XH_save.copy()
+    iRs = dec.XH[:,-1]
+    iRsu = np.unique(iRs)
+    H = dec.XH[:,iH]
+    keep = []
+    for iR in iRsu:
+        keep_ = np.where(iRs==iR)[0]
+        keep.extend(keep_[np.argsort(H[keep_])[::-1]][:Nkeep])
+    dec.XH = dec.XH[keep]
+def XH_to_ims(dec):
+    XH_ = dec.XH[::3]
+    M = (np.max(XH_[:,1:3],axis=0)+1).astype(int)
+    iRs = XH_[:,-1].astype(int)
+    ims = []
+    for iR in tqdm(np.unique(iRs)):
+        XH = XH_[iRs==iR]
+        H = XH[:,-3]
+        XH = XH[np.argsort(H)]
+        im_ = np.zeros(M,dtype=np.float32)
+        X = XH[:,:3].astype(int)
+        im_[X[:,1],X[:,2]]=H
+        im__ = cv2.blur(im_,(50,50))
+        ims.append(im__)
+    import napari
+    napari.view_image(np.array(ims))
+    
+def get_Xcells(cell_df,pixel_size = 0.10833*4,transpose=1,flipx=1,flipy=1):
+    xcells = cell_df['xc']*pixel_size+cell_df['yfov']
+    ycells = cell_df['yc']*pixel_size-cell_df['xfov']
+    Xcells = np.array([xcells*flipx,ycells*flipy][::transpose]).T
+    return Xcells
+def plot_cluster_scdata(scdata,cmap,clusters=[1,2],transpose=1,flipx=1,flipy=1):
+    import matplotlib.pyplot as plt
+    plt.figure(figsize=(15, 15), facecolor="black")
+
+    from matplotlib import pylab as plt
+    x,y = (scdata.obsm['X_spatial']*[flipx,flipy])[:,::transpose].T
+    #np.unique(scdata.obs["leiden"].astype(np.int))[::-1]
+    plt.scatter(x, y, c='gray', s=5, marker='.')
+    for cluster in clusters:
+        cluster_ = str(cluster)
+        inds = scdata.obs["leiden"] == cluster_
+        x_ = x[inds]
+        y_ = y[inds]
+        col = cmap[int(cluster) % len(cmap)]
+        plt.scatter(x_, y_, c=col, s=30, marker='.',label = cluster_)
+    
+    plt.grid(b=False)
+    plt.axis("off")
+    plt.axis("equal")
+    plt.legend()
+    plt.tight_layout()
+    
+def plot_gene_scdata(scdata2,gene='Sox10',nmax=20,sz_min=5,sz_max=30,transpose=1,flipx=1,flipy=1):
+    Xcells = scdata2.obsm['X_spatial'][:,::transpose]*[flipx,flipy]
+    ign = list(scdata2.var.index).index(gene)
+    scdata2.obsm['X_spatial']
+    if 'X_raw' not in scdata2.obsm:
+        Xnorm = (np.exp(scdata2.X)-1)
+        ncts = np.sum(Xnorm,axis=1)[0]
+        scdata2.obsm['X_raw']=np.round(Xnorm/ncts*np.array(scdata2.obs['total_counts'])[:,np.newaxis])
+    cts = scdata2.obsm['X_raw'][:,ign]
+
+    cts[np.isnan(cts)]=0
+    ncts = np.clip(cts/nmax,0,1)
+    size = sz_min+ncts*(sz_max-sz_min)
+    from matplotlib import cm as cmap
+    cols = cmap.coolwarm(ncts)
+    import napari
+    good_cells = slice(None)
+
+
+    #blanks = [gn for gn in df.columns if 'blank' in gn]
+    #blanks_cts = np.nanmean(df[blanks],axis=-1)
+    #good_cells = blanks_cts<th_blank
+
+    XC = -Xcells[good_cells,::-1]
+    viewer = napari.view_points(XC,size=size[good_cells],face_color=cols[good_cells],name=gene)
+    if False:
+        ifovs = np.array(list(df.index),dtype=int)//10**5
+        ifov_unk = np.unique(ifovs)
+        Xfov = np.array([np.mean(XC[ifovs==ifov],axis=0)for ifov in ifov_unk])
+        features =  {'fov':ifov_unk}
+        text = {
+            'string': '{fov}',
+            'size': 20,
+            'color': 'gray',
+            'translation': np.array([0, 0]),
+        }
+        viewer.add_points(Xfov,text=text,features=features,edge_width=0,edge_color=[0,0,0,0])
+    return viewer
+import pandas as pd
+def get_df__cell_df(save_folder,iset=0):
+    #save_folder = save_folders[1]
+    save_folder_ =save_folder+r'\final_spots'
+    saved_fls = glob.glob(save_folder_+os.sep+'*_cell_df_newCellSeg.pkl')
+    save_fl = saved_fls[iset]
+    #df = pd.read_pickle(save_folder+r'\DCBBL1_3_2_2023_set1-2_df_newCellSeg.pkl')
+    df = pd.read_pickle(save_fl.replace('_cell_df_','_df_'))
+    #cell_df = pd.read_pickle(save_folder+r'\DCBBL1_3_2_2023_set1-2_cell_df_newCellSeg.pkl')
+    cell_df = pd.read_pickle(save_fl)
+    return df,cell_df
+def get_scdata(dfR,cell_dfR,genes_prev=None,th_vol = 2500,pixel_size=0.10833*4):
+    import scanpy as sc
+    genes = [gn for gn in dfR.columns if '_smFISH' not in gn and 'blank' not in gn]
+    if genes_prev is not None:
+        genes = np.intersect1d(genes_prev,genes)
+    dfR_ = dfR[genes].copy()
+    dfR_ = dfR_.replace(np.nan, 0)
+    keep = cell_dfR['volm']>th_vol
+    dfR_ = dfR_.loc[keep]
+    cell_dfR_ = cell_dfR.loc[keep]
+    scdata2 = sc.AnnData(dfR_)
+    scdata2.obsm["X_spatial"] = get_Xcells(cell_dfR_,pixel_size =pixel_size ,transpose=1,flipx=1,flipy=1)
+    scdata2.obsm["X_raw"] = scdata2.X.copy()
+    sc.pp.calculate_qc_metrics(scdata2, percent_top=None, inplace=True)
+    sc.pp.normalize_total(scdata2, target_sum=np.median(scdata2.obs["total_counts"]))
+    sc.pp.log1p(scdata2)
+    sc.pp.neighbors(scdata2,use_rep = "X")  #metric='correlation', use_rep = "X"
+    #sc.tl.leiden(scdata2, resolution=2) 
+    #sc.tl.umap(scdata2,random_state=9)
+    sc.pp.pca(scdata2)
+    return scdata2
+
 def normalize_ims(im0,zm=5,zM=50):
     imn = np.array([cv2.blur(im_,(zm,zm))-cv2.blur(im_,(zM,zM)) for im_ in im0])
     return imn
-#added additional method, was missing get_XB
 def get_XB(im_,th=3):
     #im_ = self.im1n
     std_ = np.std(im_[::5,::5,::5])
@@ -3084,7 +3394,6 @@ def get_XB(im_,th=3):
         keep = im_[tuple(XB.T)]>=np.max(im_[tuple(XS.T)],axis=0)
         XB = XB[keep]
     return XB
-#additional method added, missing get_max_min
 def get_max_min(P,imn,delta_fit=5,ismax=True,return_ims=False):
     XI = np.indices([2*delta_fit+1]*3)-delta_fit
     keep = (np.sum(XI*XI,axis=0)<=(delta_fit*delta_fit))
@@ -3107,7 +3416,6 @@ def get_max_min(P,imn,delta_fit=5,ismax=True,return_ims=False):
     im1n_local = im1n_local/np.nansum(im1n_local,axis=1)[:,np.newaxis]
     XS = XS.reshape(list(im1n_local.shape)+[3])
     return np.nansum(im1n_local[...,np.newaxis]*XS,axis=1)
-#get best drift
 def get_best_drift(XB1_,XB2_,exp_drift,th_d = 5):
     XB2T = XB2_-exp_drift     
     #XB1_ = XB1_minus
@@ -3119,6 +3427,393 @@ def get_best_drift(XB1_,XB2_,exp_drift,th_d = 5):
     pair_minus = [XB1__,XB2__]
     drft_minus = np.mean((XB2__-XB1__),axis=0)
     return drft_minus,pair_minus
+class fine_drift:
+
+    def __init__(self,fl_ref,fl,verbose=True,sz_block=600):
+        self.sz_block=sz_block
+        self.verbose=verbose
+        self.fl,self.fl_ref='',''
+        self.get_drift(fl_ref,fl)
+        
+    def get_drift(self,fl_ref,fl):
+        if fl_ref!=self.fl_ref:
+            if self.verbose: print("Loading:",fl_ref)
+            self.im_ref = self.load_im(fl_ref)
+            if self.verbose: print("Finding markers...")
+            self.XB1_minus,self.XB1_plus = self.get_X_plus_minus(self.im_ref)
+            self.fl_ref = fl_ref
+        if fl!=self.fl:
+            if self.verbose: print("Loading:",fl)
+            self.im = self.load_im(fl)
+            if self.verbose: print("Finding markers...")
+            self.XB2_minus,self.XB2_plus = self.get_X_plus_minus(self.im)
+            if self.verbose: print("Finding rough drift...")
+            self.drift = get_txyz(self.im_ref,self.im,sz_norm=30,sz=self.sz_block)
+
+            self.exp_drift = self.drift[0]
+            if self.verbose: print("Finding fine drift...")
+            self.drft_minus,self.pair_minus = get_best_drift(self.XB1_minus,self.XB2_minus,self.exp_drift,5)
+            self.drft_plus,self.pair_plus = get_best_drift(self.XB1_plus,self.XB2_plus,self.exp_drift,5)
+            self.fl = fl
+        return self.drft_plus,self.pair_plus,self.drft_minus,self.pair_minus
+            
+            
+    def load_im(self,fl):
+        return np.array(read_im(fl)[-1],dtype=np.float32)
+        
+    def get_X_plus_minus(self,im1):
+        #load dapi
+        im1n = normalize_ims(im1,zm=30,zM=60)
+        XB1 = get_XB(-im1n,th=2.5)
+        XB1_minus = get_max_min(XB1,-im1n,delta_fit=7,ismax=True,return_ims=False)
+        XB1 = get_XB(im1n,th=2.5)
+        XB1_plus = get_max_min(XB1,im1n,delta_fit=7,ismax=True,return_ims=False)
+        return XB1_minus,XB1_plus
+
+import torch
+def unique(x, dim=None):
+    """Unique elements of x and indices of those unique elements
+    https://github.com/pytorch/pytorch/issues/36748#issuecomment-619514810
+
+    e.g.
+
+    unique(tensor([
+        [1, 2, 3],
+        [1, 2, 4],
+        [1, 2, 3],
+        [1, 2, 5]
+    ]), dim=0)
+    => (tensor([[1, 2, 3],
+                [1, 2, 4],
+                [1, 2, 5]]),
+        tensor([0, 1, 3]))
+    """
+    unique, inverse = torch.unique(
+        x, sorted=True, return_inverse=True, dim=dim)
+    perm = torch.arange(inverse.size(0), dtype=inverse.dtype,
+                        device=inverse.device)
+    inverse, perm = inverse.flip([0]), perm.flip([0])
+    return unique, inverse.new_empty(unique.size(0)).scatter_(0, inverse, perm)
+def get_unique_ordered(vals):
+    #vals = torch.from_numpy(vals)
+    vals,_ = torch.sort(vals,dim=-1)
+    del _
+    vals,rinv = unique(vals,dim=0)
+    return vals,rinv
+def get_icodesV2(dec,nmin_bits=4,delta_bits=None,iH=-3,redo=False,norm_brightness=False,nbits=24,is_unique=False):
+    """
+    This is an updated version that includes uniqueness
+    """
+    
+    import time
+    start = time.time()
+    lens = dec.lens
+    res_unfolder = dec.res_unfolder
+    Mlen = np.max(lens)
+    print("Calculating indexes within cluster...")
+    res_is = np.tile(np.arange(Mlen), len(lens))
+    res_is = res_is[res_is < np.repeat(lens, Mlen)]
+    print("Calculating index of molecule...")
+    ires = np.repeat(np.arange(len(lens)), lens)
+    #r0 = np.array([r[0] for r in res for r_ in r])
+    print("Calculating index of first molecule...")
+    r0i = np.concatenate([[0],np.cumsum(lens)])[:-1]
+    r0 = res_unfolder[np.repeat(r0i, lens)]
+    print("Total time unfolded molecules:",time.time()-start)
+
+    ### torch
+    ires = torch.from_numpy(ires.astype(np.int64))
+    res_unfolder = torch.from_numpy(res_unfolder.astype(np.int64))
+    res_is = torch.from_numpy(res_is.astype(np.int64))
+    
+    
+    
+    ### get score for brightness 
+    def get_scoresH():
+        H = torch.from_numpy(dec.XH[:,-3])
+        Hlog = H#np.log(H)
+        mnH = Hlog.mean()
+        stdH = Hlog.std()
+        distribution = torch.distributions.Normal(mnH, stdH)
+        scoreH = distribution.cdf(Hlog)
+        return scoreH[res_unfolder]
+    ### get score for inter-distance between molecules
+    def get_scoresD():
+        X = dec.XH[:,:3]
+        XT = torch.from_numpy(X)
+        XD = XT[res_unfolder]-XT[r0]
+        meanD = -torch.mean(torch.abs(XD),axis=-1)
+        distribution = torch.distributions.Normal(meanD.mean(), meanD.std())
+        scoreD = distribution.cdf(meanD)
+        return scoreD
+    def get_combined_scores():
+        scoreH = get_scoresH()
+        scoreD = get_scoresD()
+        ### combine scores. Note this score is for all the molecules un-ravelled from their clusters
+        scoreF = scoreD*scoreH
+        return scoreF
+    
+    import time
+    start = time.time()
+    print("Computing score...")
+    if iH is None:
+        scoreF = get_combined_scores()
+    else:
+        scoreF = torch.from_numpy(dec.XH[:,iH])[res_unfolder]
+    print("Total time computing score:",time.time()-start)
+
+    ### organize molecules in blocks for each cluster
+    def get_asort_scores():
+        val = torch.max(scoreF)+2
+        scoreClu = torch.zeros([len(lens),Mlen],dtype=torch.float64)+val
+        scoreClu[ires,res_is]=scoreF
+        asort = scoreClu.argsort(-1)
+        scoreClu = torch.gather(scoreClu,dim=-1,index=asort)
+        scoresF2 = scoreClu[scoreClu<val-1]
+        return asort,scoresF2
+    def get_reorder(x,val=-1):
+        if type(x) is not torch.Tensor:
+            x = torch.from_numpy(np.array(x))
+        xClu = torch.zeros([len(lens),Mlen],dtype=x.dtype)+val
+        xClu[ires,res_is] = x
+        xClu = torch.gather(xClu,dim=-1,index=asort)
+        xf = xClu[xClu>val]
+        return xf
+
+    import time
+    start = time.time()
+    print("Computing sorting...")
+    asort,scoresF2 = get_asort_scores()
+    res_unfolder2 = get_reorder(res_unfolder,val=-1)
+    del asort
+    del scoreF
+    print("Total time sorting molecules by score:",time.time()-start)
+    
+    
+    
+    import time
+    start = time.time()
+    print("Finding best bits per molecules...")
+
+    Rs = dec.XH[:,-1].astype(np.int64)
+    Rs = torch.from_numpy(Rs)
+    Rs_U = Rs[res_unfolder2]
+
+    score_bits = torch.zeros([len(lens),nbits],dtype=scoresF2.dtype)-1
+    score_bits[ires,Rs_U]=scoresF2
+
+    
+    codes_lib = torch.from_numpy(np.array(dec.codes__))
+    
+    if is_unique:
+        codes_lib_01 = torch.zeros([len(codes_lib),nbits],dtype=score_bits.dtype)
+        for icd,cd in enumerate(codes_lib):
+            codes_lib_01[icd,cd]=1
+
+        print("Finding best code...")
+        batch = 10000
+        icodes_best = torch.zeros(len(score_bits),dtype=torch.int64)
+        from tqdm import tqdm
+        for i in tqdm(range((len(score_bits)//batch)+1)):
+            score_bits_ = score_bits[i*batch:(i+1)*batch]
+            if len(score_bits_)>0:
+                icodes_best[i*batch:(i+1)*batch] = torch.argmax(torch.matmul(score_bits_,codes_lib_01.T),dim=-1)
+    
+        if delta_bits is not None:
+            argsort_bits = torch.argsort(score_bits,dim=-1,descending=True)[:,:(nmin_bits+delta_bits)]
+            score_bits_ = score_bits*0
+            score_bits_.scatter_(1, argsort_bits, 1)
+            keep_all_bits = torch.all(score_bits_.gather(1,codes_lib[icodes_best])>0.5,-1)
+        else:
+            keep_all_bits = torch.all(score_bits.gather(1,codes_lib[icodes_best])>=0,-1)
+        
+        score_bits = score_bits[keep_all_bits]
+        icodes_best_ = icodes_best[keep_all_bits]
+        icodesN=icodes_best_
+        
+        indexMols_ = torch.zeros([len(lens),nbits],dtype=res_unfolder2.dtype)-1
+        indexMols_[ires,Rs_U]=res_unfolder2
+        indexMols_ = indexMols_[keep_all_bits]
+        indexMols_ = indexMols_.gather(1,codes_lib[icodes_best_])
+        # make unique
+        indexMols_,rinvMols = get_unique_ordered(indexMols_)
+        icodesN = icodesN[rinvMols]
+    else:
+        indexMols_ = torch.zeros([len(lens),nbits],dtype=res_unfolder2.dtype)-1
+        indexMols_[ires,Rs_U]=res_unfolder2
+        def get_inclusive(imols,code_lib):
+            iMol,iScore = torch.where(torch.all(imols[...,code_lib]>0,dim=-1))
+            return imols[iMol].gather(1,code_lib[iScore]),iScore
+        batch = 10000
+        from tqdm import tqdm
+        indexMolsF_ = torch.zeros([0,codes_lib.shape[-1]],dtype=torch.int64)
+        icodesN = torch.zeros([0],dtype=torch.int64)
+        for i in tqdm(range((len(indexMols_)//batch)+1)):
+            indexMols__ = indexMols_[i*batch:(i+1)*batch]
+            if len(indexMols__)>0:
+                indexMolsF__,icodesN_ = get_inclusive(indexMols__,codes_lib)
+                indexMolsF_ = torch.concatenate([indexMolsF_,indexMolsF__])
+                icodesN = torch.concatenate([icodesN,icodesN_])
+        indexMols_ = indexMolsF_
+        indexMols_,rinvMols = get_unique_ordered(indexMols_)
+        icodesN = icodesN[rinvMols]
+    XH = torch.from_numpy(dec.XH)
+    XH_pruned = XH[indexMols_]
+    
+    dec.XH_pruned=XH_pruned.numpy()
+    dec.icodesN=icodesN.numpy()
+    np.savez_compressed(dec.decoded_fl,XH_pruned=dec.XH_pruned,icodesN=dec.icodesN,gns_names = np.array(dec.gns_names),is_unique=is_unique)
+    print("Total time best bits per molecule:",time.time()-start)
+
+
+def get_icodesV3(dec,iH=-3,redo=False,norm_brightness=False,nbits=24,is_unique=False):
+    """
+    This is an updated version that includes uniqueness
+    """
+    
+    import time
+    start = time.time()
+    lens = dec.lens
+    res_unfolder = dec.res_unfolder
+    Mlen = np.max(lens)
+    print("Calculating indexes within cluster...")
+    res_is = np.tile(np.arange(Mlen), len(lens))
+    res_is = res_is[res_is < np.repeat(lens, Mlen)]
+    print("Calculating index of molecule...")
+    ires = np.repeat(np.arange(len(lens)), lens)
+    #r0 = np.array([r[0] for r in res for r_ in r])
+    print("Calculating index of first molecule...")
+    r0i = np.concatenate([[0],np.cumsum(lens)])[:-1]
+    r0 = res_unfolder[np.repeat(r0i, lens)]
+    print("Total time unfolded molecules:",time.time()-start)
+
+    ### torch
+    ires = torch.from_numpy(ires.astype(np.int64))
+    res_unfolder = torch.from_numpy(res_unfolder.astype(np.int64))
+    res_is = torch.from_numpy(res_is.astype(np.int64))
+    
+    
+    
+    ### get score for brightness 
+    def get_scoresH():
+        H = torch.from_numpy(dec.XH[:,-3])
+        Hlog = H#np.log(H)
+        mnH = Hlog.mean()
+        stdH = Hlog.std()
+        distribution = torch.distributions.Normal(mnH, stdH)
+        scoreH = distribution.cdf(Hlog)
+        return scoreH[res_unfolder]
+    ### get score for inter-distance between molecules
+    def get_scoresD():
+        X = dec.XH[:,:3]
+        XT = torch.from_numpy(X)
+        XD = XT[res_unfolder]-XT[r0]
+        meanD = -torch.mean(torch.abs(XD),axis=-1)
+        distribution = torch.distributions.Normal(meanD.mean(), meanD.std())
+        scoreD = distribution.cdf(meanD)
+        return scoreD
+    def get_combined_scores():
+        scoreH = get_scoresH()
+        scoreD = get_scoresD()
+        ### combine scores. Note this score is for all the molecules un-ravelled from their clusters
+        scoreF = scoreD*scoreH
+        return scoreF
+    
+    import time
+    start = time.time()
+    print("Computing score...")
+    if iH is None:
+        scoreF = get_combined_scores()
+    else:
+        scoreF = torch.from_numpy(dec.XH[:,iH])[res_unfolder]
+    print("Total time computing score:",time.time()-start)
+
+    ### organize molecules in blocks for each cluster
+    def get_asort_scores():
+        val = torch.max(scoreF)+2
+        scoreClu = torch.zeros([len(lens),Mlen],dtype=torch.float64)+val
+        scoreClu[ires,res_is]=scoreF
+        asort = scoreClu.argsort(-1)
+        scoreClu = torch.gather(scoreClu,dim=-1,index=asort)
+        scoresF2 = scoreClu[scoreClu<val-1]
+        return asort,scoresF2
+    def get_reorder(x,val=-1):
+        if type(x) is not torch.Tensor:
+            x = torch.from_numpy(np.array(x))
+        xClu = torch.zeros([len(lens),Mlen],dtype=x.dtype)+val
+        xClu[ires,res_is] = x
+        xClu = torch.gather(xClu,dim=-1,index=asort)
+        xf = xClu[xClu>val]
+        return xf
+
+    import time
+    start = time.time()
+    print("Computing sorting...")
+    asort,scoresF2 = get_asort_scores()
+    res_unfolder2 = get_reorder(res_unfolder,val=-1)
+    del asort
+    del scoreF
+    print("Total time sorting molecules by score:",time.time()-start)
+    
+    
+    
+    import time
+    start = time.time()
+    print("Finding best bits per molecules...")
+
+    Rs = dec.XH[:,-1].astype(np.int64)
+    Rs = torch.from_numpy(Rs)
+    Rs_U = Rs[res_unfolder2]
+
+    score_bits = torch.zeros([len(lens),nbits],dtype=scoresF2.dtype)-1
+    score_bits[ires,Rs_U]=scoresF2
+    score_bits[score_bits == -1] = 0
+
+    icodes = np.zeros(score_bits.shape[0], dtype=np.int32)
+    dists = np.zeros(score_bits.shape[0])
+
+    for col in range(dec.ncols):
+        # Subset only bits of this color
+        scores = score_bits[:,col::dec.ncols]
+        codes = torch.from_numpy(dec.codes_01[:,col::dec.ncols].astype(np.float64))
+        # Subset molecules and codes of this color, keep track of original indices
+        mol_is_color = scores.any(axis=1)
+        scores = scores[mol_is_color]
+        code_is_color = codes.any(axis=1)
+        codes = codes[code_is_color]
+        # L2 norm score vectors and codes
+        norm_scores = scores / scores.norm(dim=1)[:, None]
+        norm_codes = codes / codes.norm(dim=1)[:, None]
+        # Find max dot products and euclidean distances
+        dot = torch.matmul(norm_scores, norm_codes.T)
+        icodes_ = dot.argmax(dim=1)
+        dists_ = torch.sqrt(2 * (1 - dot[np.arange(dot.shape[0]), icodes_]))
+        icodes[np.where(mol_is_color)[0]] = np.where(code_is_color)[0][icodes_]
+        dists[np.where(mol_is_color)[0]] = dists_
+
+    spots = np.zeros((ires.max()+1, Rs_U.max()+1))
+    spots[ires, Rs_U] = res_unfolder2
+    codes_lib = torch.from_numpy(np.array(dec.codes__))
+    spots = torch.from_numpy(spots).gather(1, codes_lib[icodes]).numpy().astype(int)
+
+    seen = set()
+    keep = []
+    max_dist = 0.5167  # Dist between HW4 barcode and 1-bit error, Vizgen MERSCOPE uses 0.6
+    for i in dists.argsort():
+        if dists[i] > max_dist:
+            break
+        if seen & set(spots[i]):
+            continue  # Contains spots already used
+        seen.update(spots[i])
+        keep.append(i)
+
+
+    dec.XH_pruned = dec.XH[spots[keep]]
+    dec.icodesN = icodes[keep]
+    dec.dists = dists[keep]  # Could save this and use in scoring
+    np.savez_compressed(dec.decoded_fl.replace("decodedNew", "decodedDot"),XH_pruned=dec.XH_pruned,icodesN=dec.icodesN,gns_names = np.array(dec.gns_names),is_unique=True)
+    print("Total time best bits per molecule:",time.time()-start)
+
 class get_dapi_features:
     def __init__(self,fl,save_folder,set_='',gpu=True,im_med_fl = r'D:\Carlos\Scripts\flat_field\lemon__med_col_raw3.npz',
                 psf_fl = r'D:\Carlos\Scripts\psfs\psf_647_Kiwi.npy',redo=False):
@@ -3140,12 +3835,6 @@ class get_dapi_features:
         
         self.save_fl = save_folder+os.sep+fov+'--'+htag+'--'+set_+'dapiFeatures.npz'
         self.fl = fl
-        if os.path.exists(self.save_fl) and (not redo):
-            try:
-                dic = np.load(self.save_fl,allow_pickle=True)
-                self.Xh_minus,self.Xh_plus = dic['Xh_minus'],dic['Xh_plus']
-            except:
-                redo=True
         if not os.path.exists(self.save_fl) or redo:
             self.psf = np.load(psf_fl)
             if im_med_fl is not None:
@@ -3155,7 +3844,9 @@ class get_dapi_features:
             self.load_im()
             self.get_X_plus_minus()
             np.savez(self.save_fl,Xh_plus = self.Xh_plus,Xh_minus = self.Xh_minus)
-
+        else:
+            dic = np.load(self.save_fl)
+            self.Xh_minus,self.Xh_plus = dic['Xh_minus'],dic['Xh_plus']
     def load_im(self):
         """
         Load the image from file fl and apply: flat field, deconvolve, subtract local background and normalize by std
@@ -3163,26 +3854,26 @@ class get_dapi_features:
         im = np.array(read_im(self.fl)[-1],dtype=np.float32)
         if self.im_med_fl is not None:
             im = im/self.im_med*np.median(self.im_med)
-        imD = full_deconv(im,psf=self.psf,gpu=self.gpu)
+        imD = full_deconv(im,psf=self.psf,gpu=self.gpu,s_=512)
         imDn = norm_slice(imD,s=30)
         imDn_ = imDn/np.std(imDn)
         self.im = imDn_
     def get_X_plus_minus(self):
         #load dapi
         im1 = self.im
-        self.Xh_plus = get_local_maxfast_tensor(im1,th_fit=4.5,delta=5,delta_fit=5)
-        self.Xh_minus = get_local_maxfast_tensor(-im1,th_fit=4.5,delta=5,delta_fit=5)
+        self.Xh_plus = get_local_maxfast_tensor(im1,th_fit=3,delta=5,delta_fit=5)
+        self.Xh_minus = get_local_maxfast_tensor(-im1,th_fit=3,delta=5,delta_fit=5)
 
 
 
 def get_im_from_Xh(Xh,resc=5):
     X = np.round(Xh[:,:3]/resc).astype(int)
-    X-=np.min(X,axis=0)
+    #X-=np.min(X,axis=0)
     sz = np.max(X,axis=0)
     imf = np.zeros(sz+1,dtype=np.float32)
     imf[tuple(X.T)]=1
     return imf
-def get_Xtzxy(X,X_ref,tzxy0,resc,learn=0.8):
+def get_Xtzxy(X,X_ref,tzxy0,resc,learn=1,return_counts=False):
     tzxy = tzxy0
     for it_ in range(5):
         XT = X-tzxy
@@ -3192,16 +3883,17 @@ def get_Xtzxy(X,X_ref,tzxy0,resc,learn=0.8):
         X_ = X[keep]
         tzxy = np.mean(X_-X_ref_,axis=0)
         #print(tzxy)
+    if return_counts:
+        return tzxy,len(X_)
     return tzxy
-def get_best_translation_points(X,X_ref,resc=10):
+def get_best_translation_points(X,X_ref,resc=10,return_counts=False):
     im = get_im_from_Xh(X,resc=resc)
     im_ref = get_im_from_Xh(X_ref,resc=resc)
     from scipy.signal import fftconvolve
     im_cor = fftconvolve(im,im_ref[::-1,::-1,::-1])
-    tzxy = np.array(np.unravel_index(np.argmax(im_cor),im_cor.shape))-im.shape+1
+    tzxy = np.array(np.unravel_index(np.argmax(im_cor),im_cor.shape))-im_ref.shape+1###changed to im_ref.shape
     tzxy = tzxy*resc
-    tzxy = get_Xtzxy(X,X_ref,tzxy)
-    return tzxy
+    return get_Xtzxy(X,X_ref,tzxy,return_counts=return_counts)
 def load_segmentation(dec,segm_folder =  r'\\merfish8\merfish8v2\20230805_D103_Myh67_d80KO\DNA_singleCy5\AnalysisDeconvolve_CG\SegmentationDAPI_CG',tag='H1_R1',th_vol=5000):
     dec.fl_dapi = segm_folder+os.sep+dec.fov+'--'+tag+'--CYTO_segm.npz'
     dic = np.load(dec.fl_dapi)
@@ -3226,8 +3918,8 @@ def get_xy_fl(fl):
     txt = open(fl_xml,'r').read()
     xyfov = eval(txt.split('<stage_position type="custom">')[-1].split('<')[0])
     return xyfov
-def load_segmentation(dec,segm_folder =  r'\\merfish8\merfish8v2\20230805_D103_Myh67_d80KO\DNA_singleCy5\AnalysisDeconvolve_CG\SegmentationDAPI_CG',tag='H1_R1',th_vol=5000):
-    dec.fl_dapi = segm_folder+os.sep+dec.fov+'--'+tag+'--CYTO_segm.npz'
+def load_segmentation(dec,segm_folder =  r'/mnt/merfish9/20230919_R128_N5S1MER_analysis/RMERFISH/Segmentation',tag='H1_R1',th_vol=5000):
+    dec.fl_dapi = segm_folder+os.sep+dec.fov+".npz"
     dic = np.load(dec.fl_dapi)
     im_segm = dic['segm']
     dec.shape = dic['shape']
