@@ -7,18 +7,20 @@ import re
 import numpy as np
 import multiprocessing
 import logging
+import cv2
 from functools import lru_cache
 
 from ioMicro import read_im, get_local_max_tile, get_dapi_features
 
 
-data_folders = r"/mnt/merfish10/20231024_D106Luo/RNA/H*"
-save_folder = r"/mnt/merfish11/20231024_D106Luo_RNA_analysis"
-psf_file = r"psf_647_Kiwi_D106.npy"
-flat_field_fl = r"D106_RNA__med_col_raw"
+data_folders = r"/mnt/merfish10/20231107_D106LuoRMER/RNA/H*"
+skip = ["/mnt/merfish10/20231107_D106LuoRMER/RNA/H0/"]
+save_folder = r"/mnt/merfish10/20231107_D106LuoRMER_analysis"
+psf_file = r"psf_647_Kiwi.npy"
+flat_field_fl = r"D106_RMER_repeat__med_col_raw"
 set__ = ""
 
-gpu_workers = 1
+gpu_workers = 2
 cpu_workers = 3
 
 # standard is 4, its number of colors +1
@@ -31,11 +33,11 @@ def compute_fits(image_file, icol, save_fl, psf, gpu):
     im_ = read_im(image_file)
     im__ = np.array(im_[icol], dtype=np.float32)
 
-    # fl_med = flat_field_fl + str(icol) + ".npz"
+    fl_med = flat_field_fl + str(icol) + ".npz"
 
-    # im_med = np.array(np.load(fl_med)["im"], dtype=np.float32)
-    # im_med = cv2.blur(im_med, (20, 20))
-    # im__ = im__ / im_med * np.median(im_med)
+    im_med = np.array(np.load(fl_med)["im"], dtype=np.float32)
+    im_med = cv2.blur(im_med, (20, 20))
+    im__ = im__ / im_med * np.median(im_med)
 
     Xh = get_local_max_tile(
         im__,
@@ -77,8 +79,10 @@ def add_new_images_to_queue(queue, messages):
     all_flds = glob.glob(data_folders + set__ + os.sep)
     all_flds.sort(key=natural_keys)
     for fld in all_flds:
+        if fld in skip:
+            continue
         messages.put(f"Scanner--Scanning {os.path.split(fld.strip(os.sep))[-1]}")
-        files = glob.glob(fld + os.sep + "*.zarr")
+        files = sorted(glob.glob(fld + os.sep + "*.zarr"))
         for i, filename in enumerate(files):
             messages.put(f"Scanner--Scanning {os.path.split(fld.strip(os.sep))[-1]} ({len(files) - i} images left)")
             fov = os.path.basename(filename).split(".")[0]
@@ -110,9 +114,9 @@ def worker(queue, messages, gpu, name):
     while True:
         messages.put(f"Worker {name} Waiting")
         image_fl, save_fl = queue.get()
-        messages.put(f"Worker {name} {os.path.split(save_fl)[-1]}")
         start_time = time.time()
         if save_fl.endswith("Xhfits.npz"):
+            messages.put(f"Worker {name} {os.path.split(save_fl)[-1]}")
             icol = int(re.search(r"--col(\d+)__", save_fl)[1])
             try:
                 compute_fits(image_fl, icol, save_fl, psf, gpu)
@@ -121,19 +125,20 @@ def worker(queue, messages, gpu, name):
         elif save_fl.endswith("dapiFeatures.npz"):
             if gpu:
                 queue.put([image_fl, save_fl])
+                time.sleep(0.1)
                 continue
-            else:
-                try:
-                    get_dapi_features(
-                        image_fl,
-                        save_folder,
-                        "",
-                        gpu=False,
-                        im_med_fl=f"{flat_field_fl}3.npz",
-                        psf_fl=psf_file,
-                    )
-                except Exception as e:
-                    messages.put([e, image_fl, save_fl, name])
+            messages.put(f"Worker {name} {os.path.split(save_fl)[-1]}")
+            try:
+                get_dapi_features(
+                    image_fl,
+                    save_folder,
+                    "",
+                    gpu=False,
+                    im_med_fl=f"{flat_field_fl}3.npz",
+                    psf_fl=psf_file,
+                )
+            except Exception as e:
+                messages.put([e, image_fl, save_fl, name])
         messages.put(f"Elapsed {time.time() - start_time}")
 
 
