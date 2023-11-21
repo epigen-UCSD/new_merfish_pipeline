@@ -3,6 +3,7 @@ import glob
 import time
 import datetime
 import os
+import sys
 import re
 import numpy as np
 import multiprocessing
@@ -142,31 +143,11 @@ def worker(queue, messages, gpu, name):
         messages.put(f"Elapsed {time.time() - start_time}")
 
 
-def main(stdscr):
+def curses_interface(stdscr, messages, tasks, workers):
     # Setup
     stdscr.clear()
     curses.curs_set(0)
     stdscr.nodelay(True)
-
-    if not os.path.exists(save_folder):
-        os.makedirs(save_folder)
-
-    tasks = multiprocessing.Queue()
-    messages = multiprocessing.Queue()
-    manager_process = multiprocessing.Process(target=manager, kwargs={"queue": tasks, "messages": messages})
-    manager_process.start()
-
-    gpu_kwargs = {"queue": tasks, "messages": messages, "gpu": True}
-    cpu_kwargs = {"queue": tasks, "messages": messages, "gpu": False}
-    workers = []
-    for i in range(1, gpu_workers + 1):
-        gpu_kwargs["name"] = f"GPU-{i}"
-        workers.append(multiprocessing.Process(target=worker, kwargs=gpu_kwargs))
-    for i in range(1, cpu_workers + 1):
-        cpu_kwargs["name"] = f"CPU-{i}"
-        workers.append(multiprocessing.Process(target=worker, kwargs=cpu_kwargs))
-    for p in workers:
-        p.start()
 
     scanning = ""
     worker_status = {}
@@ -224,6 +205,44 @@ def main(stdscr):
                 break
         time.sleep(0.5)
 
+
+def debug_interface(messages):
+    while True:
+        while not messages.empty():
+            message = messages.get()
+            if isinstance(message, list):
+                error, image_fl, save_fl, name = message
+                print(f"{name}, {save_fl}, {error}")
+            else:
+                print(message)
+
+
+def main(mode=None):
+    if not os.path.exists(save_folder):
+        os.makedirs(save_folder)
+
+    tasks = multiprocessing.Queue()
+    messages = multiprocessing.Queue()
+    manager_process = multiprocessing.Process(target=manager, kwargs={"queue": tasks, "messages": messages})
+    manager_process.start()
+
+    gpu_kwargs = {"queue": tasks, "messages": messages, "gpu": True}
+    cpu_kwargs = {"queue": tasks, "messages": messages, "gpu": False}
+    workers = []
+    for i in range(1, gpu_workers + 1):
+        gpu_kwargs["name"] = f"GPU-{i}"
+        workers.append(multiprocessing.Process(target=worker, kwargs=gpu_kwargs))
+    for i in range(1, cpu_workers + 1):
+        cpu_kwargs["name"] = f"CPU-{i}"
+        workers.append(multiprocessing.Process(target=worker, kwargs=cpu_kwargs))
+    for p in workers:
+        p.start()
+
+    if mode == "debug":
+        debug_interface(messages)
+    else:
+        curses.wrapper(curses_interface, messages, tasks, workers)
+
     manager_process.terminate()
     manager_process.join()
     manager_process.close()
@@ -234,4 +253,7 @@ def main(stdscr):
 
 
 if __name__ == "__main__":
-    curses.wrapper(main)
+    if len(sys.argv) > 1 and sys.argv[1] == "--debug":
+        main(mode="debug")
+    else:
+        main()

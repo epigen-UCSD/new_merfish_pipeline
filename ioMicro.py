@@ -2128,24 +2128,24 @@ class decoder_simple():
         XH = []
         for iH in tqdm(np.arange(len(all_flds))):
             fld = all_flds[iH].strip("/")
-            if 'MER' in os.path.basename(fld):
-                for icol in range(ncols):
-                    tag = os.path.basename(fld)
-                    save_fl = save_folder+os.sep+fov.split('.')[0]+'--'+tag+'--col'+str(icol)+'__Xhfits.npy.npz'
-                    if not os.path.exists(save_fl):save_fl = save_fl.replace('.npy','')
-                    try:
-                        Xh = np.load(save_fl)['Xh']
-                        Xh = Xh[Xh[:,-1]>th_h]
-                        tzxy = drifts[iH][0]
-                        Xh[:,:3]+=tzxy# drift correction
-                        is_low = 'low' in tag
-                        ih = get_iH(fld) # get bit
-                        bit = ((ih-1)%nbits)*ncols+icol+0.5*is_low
-                        icolR = np.array([[icol,bit]]*len(Xh))
-                        XH_ = np.concatenate([Xh,icolR],axis=-1)
-                        XH.extend(XH_)
-                    except:
-                        print("Failed:",save_fl)
+            #if 'MER' in os.path.basename(fld) or 'RNA' in os.path.basename(fld):
+            for icol in range(ncols):
+                tag = os.path.basename(fld)
+                save_fl = save_folder+os.sep+fov.split('.')[0]+'--'+tag+'--col'+str(icol)+'__Xhfits.npy.npz'
+                if not os.path.exists(save_fl):save_fl = save_fl.replace('.npy','')
+                try:
+                    Xh = np.load(save_fl)['Xh']
+                    Xh = Xh[Xh[:,-1]>th_h]
+                    tzxy = drifts[iH][0]
+                    Xh[:,:3]+=tzxy# drift correction
+                    is_low = 'low' in tag
+                    ih = get_iH(fld) # get bit
+                    bit = ((ih-1)%nbits)*ncols+icol+0.5*is_low
+                    icolR = np.array([[icol,bit]]*len(Xh))
+                    XH_ = np.concatenate([Xh,icolR],axis=-1)
+                    XH.extend(XH_)
+                except:
+                    print("Failed:",save_fl)
         self.XH = np.array(XH)
     def get_inters(self,dinstance_th=2,enforce_color=False):
         """Get an initial intersection of points and save in self.res"""
@@ -3861,8 +3861,8 @@ class get_dapi_features:
     def get_X_plus_minus(self):
         #load dapi
         im1 = self.im
-        self.Xh_plus = get_local_maxfast_tensor(im1,th_fit=3,delta=5,delta_fit=5)
-        self.Xh_minus = get_local_maxfast_tensor(-im1,th_fit=3,delta=5,delta_fit=5)
+        self.Xh_plus = get_local_maxfast_tensor(im1,th_fit=3,delta=5,delta_fit=5,gpu=self.gpu)
+        self.Xh_minus = get_local_maxfast_tensor(-im1,th_fit=3,delta=5,delta_fit=5,gpu=self.gpu)
 
 
 
