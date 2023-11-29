@@ -14,14 +14,14 @@ from functools import lru_cache
 from ioMicro import read_im, get_local_max_tile, get_dapi_features
 
 
-data_folders = r"/mnt/merfish10/20231107_D106LuoRMER/RNA/H*"
-skip = ["/mnt/merfish10/20231107_D106LuoRMER/RNA/H0/"]
-save_folder = r"/mnt/merfish10/20231107_D106LuoRMER_analysis"
-psf_file = r"psf_647_Kiwi.npy"
-flat_field_fl = r"D106_RMER_repeat__med_col_raw"
+data_folders = r"/mnt/merfish3v1/20231024_RD129_N5S2heart/RMERFISH/H*"
+skip = []
+save_folder = r"/mnt/merfish3v1/20231024_RD129_N5S2heart_MERFISH_analysis/"
+psf_file = r"psfs/psf_D103_B.npy"
+flat_field_fl = r"flat_field/RD129_H2_RMER__med_col_raw"
 set__ = ""
 
-gpu_workers = 2
+gpu_workers = 1
 cpu_workers = 3
 
 # standard is 4, its number of colors +1
@@ -112,8 +112,8 @@ def manager(queue, messages):
 
 def worker(queue, messages, gpu, name):
     psf = np.load(psf_file)
+    messages.put(f"Worker {name} Waiting")
     while True:
-        messages.put(f"Worker {name} Waiting")
         image_fl, save_fl = queue.get()
         start_time = time.time()
         if save_fl.endswith("Xhfits.npz"):
@@ -123,6 +123,7 @@ def worker(queue, messages, gpu, name):
                 compute_fits(image_fl, icol, save_fl, psf, gpu)
             except Exception as e:
                 messages.put([e, image_fl, save_fl, name])
+            messages.put(f"Worker {name} Waiting")
         elif save_fl.endswith("dapiFeatures.npz"):
             if gpu:
                 queue.put([image_fl, save_fl])
@@ -140,6 +141,7 @@ def worker(queue, messages, gpu, name):
                 )
             except Exception as e:
                 messages.put([e, image_fl, save_fl, name])
+            messages.put(f"Worker {name} Waiting")
         messages.put(f"Elapsed {time.time() - start_time}")
 
 
@@ -213,7 +215,7 @@ def debug_interface(messages):
             if isinstance(message, list):
                 error, image_fl, save_fl, name = message
                 print(f"{name}, {save_fl}, {error}")
-            else:
+            elif not message.endswith("images left)"):
                 print(message)
 
 
