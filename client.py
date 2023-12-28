@@ -4,10 +4,11 @@ import os
 import multiprocessing
 from ioMicro import read_im, get_local_max_tile, get_dapi_features
 import numpy as np
+import cv2
 import logging
 
 client_name = "pumpkin"
-gpu_workers = 0
+gpu_workers = 1
 cpu_workers = 2
 
 hostname = "breadfruit.ucsd.edu"
@@ -67,13 +68,23 @@ def worker(name, gpu):
             img_nas, img_file, save_nas, save_fl, psf_file, med_file, icol = server.request(name, gpu)
             img_file = os.path.join(naspath[img_nas], img_file)
             save_fl = os.path.join(naspath[save_nas], save_fl)
+            if not os.path.exists(os.path.dirname(save_fl)):
+                os.mkdir(os.path.dirname(save_fl))
             logging.info(f"Creating {save_fl} from {img_file}")
             if psf_file not in psfs:
-                logging.info(f"Getting PSF {psf_file}")
-                psfs[psf_file] = np.array(server.get_psf(psf_file))
+                if os.path.exists(psf_file):
+                    psfs[psf_file] = np.load(psf_file)
+                else:
+                    logging.info(f"Getting PSF {psf_file}")
+                    psfs[psf_file] = np.array(server.get_psf(psf_file))
+                    psfs[psf_file].save(psf_file)
             if (med_file, icol) not in meds:
-                logging.info(f"Getting median image {med_file} for color {icol}")
-                meds[med_file, icol] = np.array(server.get_flat_field(med_file, icol))
+                if os.path.exists(f"{med_file}{icol}.npz"):
+                    meds[med_file, icol] = np.array(np.load(f"{med_file}{icol}.npz")["im"], dtype=np.float32)
+                    meds[med_file, icol] = cv2.blur(meds[med_file, icol], (20, 20))
+                else:
+                    logging.info(f"Getting median image {med_file} for color {icol}")
+                    meds[med_file, icol] = np.array(server.get_flat_field(med_file, icol))
             if "Xhfits" in save_fl:
                 compute_fits(img_file, icol, save_fl, psfs[psf_file], meds[med_file, icol], gpu)
             elif "dapiFeatures" in save_fl:
