@@ -911,7 +911,7 @@ def get_local_max_tile(im_,th=2500,s_ = 500,pad=50,psf=None,plt_val=None,snorm=3
         imsm = im_[:,ix:ix+pad+s_,iy:iy+pad+s_]
         out_im = imsm
         if deconv is not None:
-            out_im = apply_deconv(imsm,psf=psf,plt_val=False,parameters = deconv,gpu=gpu,force=False,pad=None)
+            out_im = apply_deconv(imsm,psf=psf,plt_val=False,parameters = deconv,gpu=gpu,force=True,pad=None)
         out_im2 = norm_slice(out_im,s=snorm)
         #print(time.time()-t)
         Xh = get_local_maxfast_tensor(out_im2,th,im_raw=imsm,dic_psf=None,delta=delta,delta_fit=delta_fit,sigmaZ=sigmaZ,sigmaXY=sigmaXY,gpu=gpu)
@@ -3204,7 +3204,7 @@ def new_segmentation(fl =r'\\192.168.0.100\bbfish100\DCBBL1_4week_6_2_2023\H1_ME
         imd = im_dapi
         if psf_file is not None:
             psf = np.load(psf_file)
-            imd = full_deconv(im_dapi,s_=500,pad=100,psf=psf,parameters={'method': 'wiener', 'beta': 0.01},gpu=True,force=False)
+            imd = full_deconv(im_dapi,s_=500,pad=100,psf=psf,parameters={'method': 'wiener', 'beta': 0.01},gpu=True,force=True)
         im_dapi_ = norm_slice(imd,s=sdapi)
 
 
@@ -3836,11 +3836,17 @@ class get_dapi_features:
         self.save_fl = save_folder+os.sep+fov+'--'+htag+'--'+set_+'dapiFeatures.npz'
         self.fl = fl
         if not os.path.exists(self.save_fl) or redo:
-            self.psf = np.load(psf_fl)
+            if isinstance(psf_fl, str):
+                self.psf = np.load(psf_fl)
+            else:
+                self.psf = psf_fl
             if im_med_fl is not None:
-                im_med = np.load(im_med_fl)['im']
-                im_med = cv2.blur(im_med,(20,20))
-                self.im_med=im_med
+                if isinstance(im_med_fl, str):
+                    im_med = np.load(im_med_fl)['im']
+                    im_med = cv2.blur(im_med,(20,20))
+                    self.im_med=im_med
+                else:
+                    self.im_med = im_med_fl
             self.load_im()
             self.get_X_plus_minus()
             np.savez(self.save_fl,Xh_plus = self.Xh_plus,Xh_minus = self.Xh_minus)
@@ -3854,7 +3860,7 @@ class get_dapi_features:
         im = np.array(read_im(self.fl)[-1],dtype=np.float32)
         if self.im_med_fl is not None:
             im = im/self.im_med*np.median(self.im_med)
-        imD = full_deconv(im,psf=self.psf,gpu=self.gpu,s_=512)
+        imD = full_deconv(im,psf=self.psf,gpu=self.gpu,s_=512,force=True)
         imDn = norm_slice(imD,s=30)
         imDn_ = imDn/np.std(imDn)
         self.im = imDn_
