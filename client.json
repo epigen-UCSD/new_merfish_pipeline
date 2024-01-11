@@ -1,0 +1,14 @@
+{
+    "client-name": "pumpkin",
+    "gpu-workers": 1,
+    "cpu-workers": 2,
+    "server-hostname": "breadfruit.ucsd.edu",
+    "server-port": 8000,
+    "nas-mapping": {
+        "merfish9": "/mnt/merfish9",
+        "merfish10": "/mnt/merfish10",
+        "merfish11": "/mnt/merfish11",
+        "merfish12": "/mnt/merfish12",
+        "merfish13": "/mnt/merfish13"
+    }
+}

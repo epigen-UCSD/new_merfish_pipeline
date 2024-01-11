@@ -5,23 +5,10 @@ import multiprocessing
 from ioMicro import read_im, get_local_max_tile, get_dapi_features
 import numpy as np
 import cv2
+import json
 import logging
 
-client_name = "pumpkin"
-gpu_workers = 1
-cpu_workers = 2
-
-hostname = "breadfruit.ucsd.edu"
-port = 8000
-
-naspath = {
-    "merfish9": "/mnt/merfish9",
-    "merfish10": "/mnt/merfish10",
-    "merfish11": "/mnt/merfish11",
-    "merfish12": "/mnt/merfish12",
-    "merfish13": "/mnt/merfish13",
-    "/home/plt3": "/home/plt3"
-}
+config = json.load(open("client.json"))
 
 
 def compute_fits(image_file, icol, save_fl, psf, im_med, gpu):
@@ -54,7 +41,7 @@ def compute_fits(image_file, icol, save_fl, psf, im_med, gpu):
 
 
 def worker(name, gpu):
-    server = xmlrpc.client.ServerProxy(f"http://{hostname}:{port}")
+    server = xmlrpc.client.ServerProxy(f"http://{config['server-hostname']}:{config['server-port']}")
     logging.basicConfig(
         level=logging.INFO, format=f"%(asctime)s -- {name} -- %(message)s", datefmt="%Y/%m/%d %I:%M:%S %p"
     )
@@ -66,10 +53,12 @@ def worker(name, gpu):
     while True:
         try:
             img_nas, img_file, save_nas, save_fl, psf_file, med_file, icol = server.request(name, gpu)
-            img_file = os.path.join(naspath[img_nas], img_file)
-            save_fl = os.path.join(naspath[save_nas], save_fl)
+            img_file = os.path.join(config["nas-mapping"][img_nas], img_file)
+            save_fl = os.path.join(config["nas-mapping"][save_nas], save_fl)
+            if os.path.exists(save_fl):
+                continue
             if not os.path.exists(os.path.dirname(save_fl)):
-                os.mkdir(os.path.dirname(save_fl))
+                os.makedirs(os.path.dirname(save_fl), exist_ok=True)
             logging.info(f"Creating {save_fl} from {img_file}")
             if psf_file not in psfs:
                 if os.path.exists(psf_file):
@@ -103,11 +92,11 @@ def worker(name, gpu):
 
 
 workers = []
-for i in range(1, gpu_workers + 1):
-    kwargs = {"name": f"{client_name}-GPU.{i}", "gpu": True}
+for i in range(1, config["gpu-workers"] + 1):
+    kwargs = {"name": f"{config['client-name']}-GPU.{i}", "gpu": True}
     workers.append(multiprocessing.Process(target=worker, kwargs=kwargs))
-for i in range(1, cpu_workers + 1):
-    kwargs = {"name": f"{client_name}-CPU.{i}", "gpu": False}
+for i in range(1, config["cpu-workers"] + 1):
+    kwargs = {"name": f"{config['client-name']}-CPU.{i}", "gpu": False}
     workers.append(multiprocessing.Process(target=worker, kwargs=kwargs))
 
 for p in workers:
