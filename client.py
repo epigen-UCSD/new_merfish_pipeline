@@ -11,7 +11,7 @@ import logging
 config = json.load(open("client.json"))
 
 
-def compute_fits(image_file, icol, save_fl, psf, im_med, gpu):
+def compute_fits(image_file, icol, save_fl, psf, im_med, gpu, name):
     im_ = read_im(image_file)
     im__ = np.array(im_[icol], dtype=np.float32)
     im__ = im__ / im_med * np.median(im_med)
@@ -37,7 +37,7 @@ def compute_fits(image_file, icol, save_fl, psf, im_med, gpu):
         sigmaXY=1.5,
     )
 
-    np.savez_compressed(save_fl, Xh=Xh)
+    np.savez_compressed(save_fl, Xh=Xh, author=name)
 
 
 def worker(name, gpu):
@@ -59,6 +59,7 @@ def worker(name, gpu):
                 continue
             if not os.path.exists(os.path.dirname(save_fl)):
                 os.makedirs(os.path.dirname(save_fl), exist_ok=True)
+                os.chmod(os.path.dirname(save_fl), 0o777)
             logging.info(f"Creating {save_fl} from {img_file}")
             if psf_file not in psfs:
                 if os.path.exists(psf_file):
@@ -75,7 +76,7 @@ def worker(name, gpu):
                     logging.info(f"Getting median image {med_file} for color {icol}")
                     meds[med_file, icol] = np.array(server.get_flat_field(med_file, icol))
             if "Xhfits" in save_fl:
-                compute_fits(img_file, icol, save_fl, psfs[psf_file], meds[med_file, icol], gpu)
+                compute_fits(img_file, icol, save_fl, psfs[psf_file], meds[med_file, icol], gpu, name)
             elif "dapiFeatures" in save_fl:
                 get_dapi_features(
                     img_file,
@@ -84,7 +85,9 @@ def worker(name, gpu):
                     gpu=False,
                     im_med_fl=meds[med_file, icol],
                     psf_fl=psfs[psf_file],
+                    name=name
                 )
+            server.complete(name)
         except xmlrpc.client.Fault:
             time.sleep(1)
         except ConnectionRefusedError:

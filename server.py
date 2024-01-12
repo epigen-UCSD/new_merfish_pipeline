@@ -9,13 +9,13 @@ import multiprocessing
 import cv2
 import curses
 
-data_nas = "merfish11"
-data_folders = r"20230919_R128_N5S1MERNeuro/RMERFISH/H*"
+data_nas = "merfish12"
+data_folders = r"20231024_RD129_N5S2heart/RMERFISH/H*"
 skip = []
-save_nas = "merfish11"
-save_folder = "20230919_R128_N5S1MERNeuro_analysis3"
+save_nas = "merfish12"
+save_folder = "20231024_RD129_N5S2heart_MERFISH_analysis"
 psf_file = r"psfs/psf_D103_B.npy"
-flat_field_fl = r"flat_field/R128__med_col_raw"
+flat_field_fl = r"flat_field/RD129_H2_RMER__med_col_raw"
 # If order="hyb", fitting will be done for all FOVs in H1, then all FOVs in H2, etc.
 # If order="fov", fitting will be done for all hybs of FOV 0, then all hybs of FOV 1, etc.
 order = "hyb"
@@ -54,6 +54,7 @@ class TaskServer:
         all_flds.sort(key=natural_keys)
         self.tasks = []
         self.dapi_features = []
+        total = 0
         for fld in all_flds:
             self.messages.put(["Scanning", fld])
             if fld in skip:
@@ -65,12 +66,14 @@ class TaskServer:
                 prefix = os.path.join(save_folder, f"{fov}--{hyb}")
                 for icol in range(ncol - 1):
                     save_fl = f"{prefix}--col{icol}__Xhfits.npz"
+                    total += 1
                     if not os.path.exists(os.path.join(naspath[save_nas], save_fl)):
                         self.tasks.append((data_nas, filename_no_nas, save_nas, save_fl, psf_file, flat_field_fl, icol))
                 save_fl = f"{prefix}--dapiFeatures.npz"
+                total += 1
                 if not os.path.exists(os.path.join(naspath[save_nas], save_fl)):
                     self.tasks.append((data_nas, filename_no_nas, save_nas, save_fl, psf_file, flat_field_fl, ncol - 1))
-                self.messages.put(["Tasks", len(self.tasks)])
+                self.messages.put(["Tasks", len(self.tasks), total])
         if order == "fov":
             self.tasks.sort(key=parse_fov)
         self.messages.put(["Scanning", ""])
@@ -87,6 +90,9 @@ class TaskServer:
         self.messages.put(["Assigning", data, client])
         return data
 
+    def complete(self, client):
+        self.messages.put(["Completed", client])
+
     def get_psf(self, psf_file):
         return np.load(psf_file).tolist()
 
@@ -101,6 +107,7 @@ class TaskServer:
             server.register_function(self.request)
             server.register_function(self.get_psf)
             server.register_function(self.get_flat_field)
+            server.register_function(self.complete)
             server.serve_forever()
 
 
@@ -120,23 +127,34 @@ def interface(stdscr, messages):
     durations = []
     done = None
     tasks = 0
+    total = 1
+    clear_counter = 0
     while True:
         while not messages.empty():
             message = messages.get()
             if message[0] == "Scanning":
                 scanning = message[1]
             elif message[0] == "Assigning":
-                if message[2] in worker_started:
-                    durations.append(time.time() - worker_started[message[2]])
+                worker_status[message[2]] = message[1][3]
+                worker_started[message[2]] = time.time()
+            elif message[0] == "Completed":
+                if message[1] in worker_started:
+                    durations.append(time.time() - worker_started[message[1]])
                     avg = sum(durations[:100]) / len(durations[:100])
                     secs_left = (avg * tasks) / len(worker_status)
                     td = datetime.timedelta(seconds=int(secs_left))
                     done = datetime.datetime.now() + td
                     tasks -= 1
-                worker_status[message[2]] = message[1][3]
-                worker_started[message[2]] = time.time()
+                    del worker_started[message[1]]
+                if message[1] in worker_status:
+                    del worker_status[message[1]]
             elif message[0] == "Tasks":
                 tasks = message[1]
+                total = message[2]
+        if clear_counter > 10:
+            stdscr.clear()
+            clear_counter = 0
+        clear_counter += 1
         stdscr.erase()
         stdscr.addstr(0, 0, f"Fitting images on {data_nas} in {data_folders}")
         stdscr.addstr(1, 0, f"Saving fits to {save_nas} in {save_folder}")
@@ -146,12 +164,15 @@ def interface(stdscr, messages):
         if scanning:
             stdscr.addstr(5, 0, f"{tasks} files left to generate, scanning {scanning}")
         else:
-            stdscr.addstr(5, 0, f"{tasks} files left to generate")
+            pct = 100 * (total - tasks) / total
+            stdscr.addstr(5, 0, f"{tasks} files left to generate, {pct:0.1f}% complete")
         if done:
             stdscr.addstr(6, 0, f"Estimated completion in {td} at {done}")
         else:
             stdscr.addstr(6, 0, "Estimated completion: TBD")
         stdscr.addstr(7, 0, "-----------")
+        if not worker_status:
+            stdscr.addstr(8, 0, "Waiting for task requests")
         for i, (name, status) in enumerate(worker_status.items(), start=8):
             duration = datetime.timedelta(seconds=int(time.time() - worker_started[name]))
             stdscr.addstr(i, 0, f"{name}: {status} ({duration})")
