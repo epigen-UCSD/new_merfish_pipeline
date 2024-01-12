@@ -2115,7 +2115,6 @@ class decoder_simple():
         self.set_ = set_
         save_folder = self.save_folder
         drift_fl = save_folder+os.sep+'driftNew_'+fov.split('.')[0]+'--'+set_+'.pkl'
-
         if os.path.exists(drift_fl):
             drifts,all_flds,fov,fl_ref = pickle.load(open(drift_fl,'rb'))
             self.drifts,self.all_flds,self.fov,self.fl_ref = drifts,all_flds,fov,fl_ref
@@ -2124,28 +2123,27 @@ class decoder_simple():
             drifts,all_flds,fov = pickle.load(open(drift_fl,'rb'))
             self.drifts,self.all_flds,self.fov = drifts,all_flds,fov
 
-
         XH = []
         for iH in tqdm(np.arange(len(all_flds))):
             fld = all_flds[iH].strip("/")
-            #if 'MER' in os.path.basename(fld) or 'RNA' in os.path.basename(fld):
+            #if 'MER' in os.path.basename(fld):
             for icol in range(ncols):
                 tag = os.path.basename(fld)
                 save_fl = save_folder+os.sep+fov.split('.')[0]+'--'+tag+'--col'+str(icol)+'__Xhfits.npy.npz'
                 if not os.path.exists(save_fl):save_fl = save_fl.replace('.npy','')
-                try:
-                    Xh = np.load(save_fl)['Xh']
+                Xh = np.load(save_fl,allow_pickle=True)['Xh']
+                print(Xh.shape)
+                if len(Xh.shape):
                     Xh = Xh[Xh[:,-1]>th_h]
-                    tzxy = drifts[iH][0]
-                    Xh[:,:3]+=tzxy# drift correction
-                    is_low = 'low' in tag
-                    ih = get_iH(fld) # get bit
-                    bit = ((ih-1)%nbits)*ncols+icol+0.5*is_low
-                    icolR = np.array([[icol,bit]]*len(Xh))
-                    XH_ = np.concatenate([Xh,icolR],axis=-1)
-                    XH.extend(XH_)
-                except:
-                    print("Failed:",save_fl)
+                    if len(Xh):
+                        tzxy = drifts[iH][0]
+                        Xh[:,:3]+=tzxy# drift correction
+                        ih = get_iH(fld) # get bit
+                        is_low = 'low' in tag
+                        bit = ((ih-1)%nbits)*ncols+icol+0.5*is_low
+                        icolR = np.array([[icol,bit]]*len(Xh))
+                        XH_ = np.concatenate([Xh,icolR],axis=-1)
+                        XH.extend(XH_)
         self.XH = np.array(XH)
     def get_inters(self,dinstance_th=2,enforce_color=False):
         """Get an initial intersection of points and save in self.res"""
@@ -2165,7 +2163,7 @@ class decoder_simple():
             Ts = cKDTree(Xs)
             res = Ts.query_ball_tree(Ts,dinstance_th)
         self.res = res
-    def get_inters(self,nmin_bits=4,dinstance_th=2,enforce_color=True,redo=False,save=False):
+    def get_inters(self,nmin_bits=4,dinstance_th=2,enforce_color=True,redo=False):
         """Get an initial intersection of points and save in self.res"""
         self.res_fl = self.decoded_fl.replace('decoded','res')
         if not os.path.exists(self.res_fl) or redo:
@@ -2191,11 +2189,10 @@ class decoder_simple():
             print("Unfolding indexes...")
             res_unfolder = np.concatenate(res)
             print("Saving to file:",self.res_fl)
-            self.res = res
             self.res_unfolder=res_unfolder
             self.lens=lens
-            if save:
-                np.savez(self.res_fl,res_unfolder=res_unfolder,lens=lens)
+            
+            #np.savez(self.res_fl,res_unfolder=res_unfolder,lens=lens)
         else:
             dic = np.load(self.res_fl)
             self.res_unfolder=dic['res_unfolder']
@@ -2251,6 +2248,7 @@ class decoder_simple():
                 if bit not in dic_bit_to_code: dic_bit_to_code[bit]=[]
                 dic_bit_to_code[bit].append(icd)
         self.dic_bit_to_code = dic_bit_to_code  ### a dictinary in which each bit is mapped to the inde of a code
+
     def get_icodes(self,nmin_bits=4,method = 'top4',redo=False,norm_brightness=None,nbits=48,is_unique=True):    
         #### unfold res which is a list of list with clusters of loc.
         
@@ -2259,6 +2257,7 @@ class decoder_simple():
 
         import time
         start = time.time()
+        n_on_bits = nmin_bits
         res = [r for r in res if len(r)>=nmin_bits]
         #rlens = [len(r) for r in res]
         #edges = np.cumsum([0]+rlens)
@@ -2298,14 +2297,14 @@ class decoder_simple():
         if method == 'top4':
             codes = self.codes__
             vals = np.argsort(scores_bits,axis=-1)
-            bcodes = np.sort(vals[:,-4:],axis=-1)
-            base = [nbits**3,nbits**2,nbits**1,nbits**0]
+            bcodes = np.sort(vals[:,-n_on_bits:],axis=-1)
+            base = [nbits**ion for ion in np.arange(n_on_bits)[::-1]]
             bcodes_b = np.sum(bcodes*base,axis=1)
             codes_b = np.sum(np.sort(codes,axis=-1)*base,axis=1)
             icodesN = np.zeros(len(bcodes_b),dtype=int)-1
             for icd,cd in enumerate(codes_b):
                 icodesN[bcodes_b==cd]=icd
-            bad = np.sum(scores_bits>0,axis=-1)<4
+            bad = np.sum(scores_bits>0,axis=-1)<n_on_bits
             
             icodesN[bad]=-1
             igood = np.where(icodesN>-1)[0]
@@ -2326,7 +2325,6 @@ class decoder_simple():
         if is_unique:
             import time
             start = time.time()
-
 
             mean_scores = np.mean(scores_prunedN,axis=-1)
             ordered_mols = np.argsort(mean_scores)[::-1]
@@ -2354,11 +2352,13 @@ class decoder_simple():
         import time
         start= time.time()
         self.decoded_fl = self.save_folder+os.sep+'decodedNew_'+self.fov.split('.')[0]+'--'+self.set_+'.npz'
+        if not os.path.exists(self.decoded_fl):
+            self.decoded_fl = self.save_folder+os.sep+'decoded_'+self.fov.split('.')[0]+'--'+self.set_+'.npz'
         if os.path.exists(self.decoded_fl):
             self.XH_pruned = np.load(self.decoded_fl)['XH_pruned']
             self.icodesN = np.load(self.decoded_fl)['icodesN']
             self.gns_names = np.load(self.decoded_fl)['gns_names']
-            #print("Loaded decoded:",start-time.time())
+            print("Loaded decoded:",start-time.time())
             return True
         else:
             return False
@@ -2400,16 +2400,18 @@ class decoder_simple():
                     tag = os.path.basename(fld)
                     save_fl = save_folder+os.sep+fov.split('.')[0]+'--'+tag+'--col'+str(icol)+'__Xhfits.npy.npz'
                     if not os.path.exists(save_fl):save_fl = save_fl.replace('.npy','')
-                    Xh = np.load(save_fl)['Xh']
-                    tzxy = drifts[iH][0]
-                    Xh[:,:3]+=tzxy# drift correction
-                    #ih = get_iH(fld) # get bit
-                    bit = -1#(ih-1)*3+icol
-                    if len(Xh):
-                        icolR = np.array([[icol,bit]]*len(Xh))
-                        #print(icolR.shape,Xh.shape)
-                        XH_ = np.concatenate([Xh,icolR],axis=-1)
-                        XH.extend(XH_)
+                    
+                    Xh = np.load(save_fl,allow_pickle=True)['Xh']
+                    if len(Xh.shape):
+                        tzxy = drifts[iH][0]
+                        Xh[:,:3]+=tzxy# drift correction
+                        #ih = get_iH(fld) # get bit
+                        bit = -1#(ih-1)*3+icol
+                        if len(Xh):
+                            icolR = np.array([[icol,bit]]*len(Xh))
+                            #print(icolR.shape,Xh.shape)
+                            XH_ = np.concatenate([Xh,icolR],axis=-1)
+                            XH.extend(XH_)
         self.Xh = np.array(XH)
             
     def plot_points(self,genes=['Olig2','Gfap'],cols=['r','g'],viewer = None):
@@ -3816,7 +3818,7 @@ def get_icodesV3(dec,iH=-3,redo=False,norm_brightness=False,nbits=24,is_unique=F
 
 class get_dapi_features:
     def __init__(self,fl,save_folder,set_='',gpu=True,im_med_fl = r'D:\Carlos\Scripts\flat_field\lemon__med_col_raw3.npz',
-                psf_fl = r'D:\Carlos\Scripts\psfs\psf_647_Kiwi.npy',redo=False):
+                psf_fl = r'D:\Carlos\Scripts\psfs\psf_647_Kiwi.npy',redo=False,name=None):
                 
         """
         Given a file <fl> and a save folder <save_folder> this class will load the image fl, flat field correct it, it deconvolves it using <psf_fl> and then finds the local minimum and maximum.
@@ -3849,7 +3851,7 @@ class get_dapi_features:
                     self.im_med = im_med_fl
             self.load_im()
             self.get_X_plus_minus()
-            np.savez(self.save_fl,Xh_plus = self.Xh_plus,Xh_minus = self.Xh_minus)
+            np.savez(self.save_fl,Xh_plus = self.Xh_plus,Xh_minus = self.Xh_minus, author=name)
         else:
             dic = np.load(self.save_fl)
             self.Xh_minus,self.Xh_plus = dic['Xh_minus'],dic['Xh_plus']
