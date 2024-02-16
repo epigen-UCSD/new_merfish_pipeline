@@ -1,0 +1,22 @@
+{
+    "data_nas": "renimaging2",
+    "data_folders": "01_19_2024_BigHeart2/P*",
+    "skip_hybs": [],
+    "save_nas": "renimaging2",
+    "save_folder": "01_19_2024_BigHeart2_analysis",
+    "psf_file": "psfs/psf_647_plum.npy",
+    "flat_field_fl": "flat_field/R131_P1_set12__med_col_raw",
+    "order": "hyb",
+    "ncol": 4,
+    "server-hostname": "breadfruit.ucsd.edu",
+    "server-port": 8000,
+    "nas-mapping": {
+        "merfish3v1": "/mnt/merfish3v1",
+        "merfish9": "/mnt/merfish9",
+        "merfish10": "/mnt/merfish10",
+        "merfish11": "/mnt/merfish11",
+        "merfish12": "/mnt/merfish12",
+        "merfish13": "/mnt/merfish13",
+        "renimaging2": "/mnt/renimaging2"
+    }
+}
