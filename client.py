@@ -67,7 +67,7 @@ def worker(name, gpu):
                 compute_fits(img_file, icol, save_fl, psfs[psf_file], meds[med_file], gpu, name)
             elif "dapiFeatures" in save_fl:
                 get_dapi_features(
-                    img_file, os.path.dirname(save_fl), "", gpu=False, im_med_fl=med_file, psf_fl=psf_file, name=name
+                    img_file, os.path.dirname(save_fl), "", gpu=False, im_med_fl=meds[med_file], psf_fl=psf_file, name=name
                 )
             server.complete(name)
         except xmlrpc.client.Fault:
