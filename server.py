@@ -52,11 +52,12 @@ class TaskServer:
         self.tasks.append(
             (
                 config["data_nas"],
-                image_file,
+                os.path.split(image_file),
                 config["save_nas"],
+                config["save_folder"],
                 save_fl,
-                os.path.join(config["save_folder"], os.path.basename(config["psf_file"])),
-                os.path.join(config["save_folder"], os.path.basename(config["flat_field_fl"])) + f"{icol}.npy",
+                os.path.basename(config["psf_file"]),
+                os.path.basename(config["flat_field_fl"]) + f"{icol}.npy",
                 icol,
             )
         )

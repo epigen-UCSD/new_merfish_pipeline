@@ -51,14 +51,15 @@ def worker(name, gpu):
 
     while True:
         try:
-            img_nas, img_file, save_nas, save_fl, psf_file, med_file, icol = server.request(name, gpu)
-            save_fl = os.path.join(config["nas-mapping"][save_nas], save_fl)
+            img_nas, img_file, save_nas, save_folder, save_fl, psf_file, med_file, icol = server.request(name, gpu)
+            img_file = os.path.join(*img_file)
+            save_fl = os.path.join(config["nas-mapping"][save_nas], save_folder, save_fl)
             if os.path.exists(save_fl):
                 continue
             logging.info(f"Creating {save_fl} from {img_file}")
             img_file = os.path.join(config["nas-mapping"][img_nas], img_file)
-            psf_file = os.path.join(config["nas-mapping"][save_nas], psf_file)
-            med_file = os.path.join(config["nas-mapping"][save_nas], med_file)
+            psf_file = os.path.join(config["nas-mapping"][save_nas], save_folder, psf_file)
+            med_file = os.path.join(config["nas-mapping"][save_nas], save_folder, med_file)
             if psf_file not in psfs:
                 psfs[psf_file] = np.load(psf_file)
             if med_file not in meds:
@@ -76,17 +77,18 @@ def worker(name, gpu):
             time.sleep(1)
 
 
-workers = []
-for i in range(1, config["gpu-workers"] + 1):
-    kwargs = {"name": f"{config['client-name']}-GPU.{i}", "gpu": True}
-    workers.append(multiprocessing.Process(target=worker, kwargs=kwargs))
-for i in range(1, config["cpu-workers"] + 1):
-    kwargs = {"name": f"{config['client-name']}-CPU.{i}", "gpu": False}
-    workers.append(multiprocessing.Process(target=worker, kwargs=kwargs))
+if __name__ == "__main__":
+    workers = []
+    for i in range(1, config["gpu-workers"] + 1):
+        kwargs = {"name": f"{config['client-name']}-GPU.{i}", "gpu": True}
+        workers.append(multiprocessing.Process(target=worker, kwargs=kwargs))
+    for i in range(1, config["cpu-workers"] + 1):
+        kwargs = {"name": f"{config['client-name']}-CPU.{i}", "gpu": False}
+        workers.append(multiprocessing.Process(target=worker, kwargs=kwargs))
 
-for p in workers:
-    p.start()
+    for p in workers:
+        p.start()
 
-for p in workers:
-    p.join()
-    p.close()
+    for p in workers:
+        p.join()
+        p.close()
