@@ -25,12 +25,13 @@ def natural_keys(text):
 
 
 def parse_fov(task):
-    return task[1].split("__")[-1].split(".")[0]
+    return task[1][-1].split("__")[-1].split(".")[0]
 
 
 class TaskServer:
     def __init__(self, messages):
         self.messages = messages
+        self.assigned = {}
 
     def scan_folders(self):
         all_folders = glob.glob(os.path.join(data_nas, config["data_folders"]) + os.sep)
@@ -52,7 +53,7 @@ class TaskServer:
         self.tasks.append(
             (
                 config["data_nas"],
-                os.path.split(image_file),
+                image_file.split(os.sep),
                 config["save_nas"],
                 config["save_folder"],
                 save_fl,
@@ -66,17 +67,19 @@ class TaskServer:
         total = 0
         image_file = filename.split(data_nas)[-1].strip(os.sep)
         fov = os.path.basename(filename).split(".")[0]
+        if "fovs" in config and fov not in config["fovs"]:
+            return total
         hyb = filename.split("/")[-2]
         prefix = os.path.join(config["save_folder"], f"{fov}--{hyb}")
         for icol in range(config["ncol"] - 1):
             save_fl = f"{prefix}--col{icol}__Xhfits.npz"
             total += 1
             if not os.path.exists(os.path.join(save_nas, save_fl)):
-                self.create_task(image_file, save_fl, icol)
+                self.create_task(image_file, os.path.basename(save_fl), icol)
         save_fl = f"{prefix}--dapiFeatures.npz"
         total += 1
         if not os.path.exists(os.path.join(save_nas, save_fl)):
-            self.create_task(image_file, save_fl, config["ncol"] - 1)
+            self.create_task(image_file, os.path.basename(save_fl), config["ncol"] - 1)
         return total
 
     def request(self, client, nodapi=False):
@@ -89,13 +92,19 @@ class TaskServer:
                     break
         data = self.tasks.pop(i)
         self.messages.put(["Assigning", data, client])
+        self.assigned[client] = data
         return data
 
     def complete(self, client):
         self.messages.put(["Completed", client])
+        del self.assigned[client]
+
+    def abort(self, client):
+        self.tasks.insert(0, self.assigned[client])
+        del self.assigned[client]
+        self.messages.put(["Abort", client])
 
     def start(self):
-        self.scan_folders()
         save_folder = os.path.join(save_nas, config["save_folder"])
         if not os.path.exists(save_folder):
             os.makedirs(save_folder, exist_ok=True)
@@ -107,6 +116,7 @@ class TaskServer:
             im_med = np.array(np.load(fl_med)["im"], dtype=np.float32)
             im_med = cv2.blur(im_med, (20, 20))
             np.save(os.path.join(save_folder, os.path.basename(config["flat_field_fl"]) + f"{icol}.npy"), im_med)
+        self.scan_folders()
         with SimpleXMLRPCServer((config["server-hostname"], config["server-port"]), logRequests=False) as server:
             server.register_function(self.request)
             server.register_function(self.complete)
@@ -120,7 +130,7 @@ def server_process(messages):
 
 class AnalysisStatus:
     def __init__(self):
-        self.scanning = ""
+        self.scanning = "not started"
         self.worker_status = {}
         self.worker_started = {}
         self.durations = []
@@ -132,7 +142,7 @@ class AnalysisStatus:
         if message[0] == "Scanning":
             self.scanning = message[1]
         elif message[0] == "Assigning":
-            self.worker_status[message[2]] = message[1][3]
+            self.worker_status[message[2]] = message[1][4]
             self.worker_started[message[2]] = time.time()
         elif message[0] == "Completed":
             if message[1] in self.worker_started:
@@ -144,6 +154,8 @@ class AnalysisStatus:
         elif message[0] == "Tasks":
             self.tasks = message[1]
             self.total = message[2]
+        elif message[0] == "Abort":
+            self.worker_status[message[1]] = "Worker crashed"
 
     def update_time_remaining(self):
         avg = sum(self.durations[-100:]) / len(self.durations[-100:])
@@ -155,6 +167,8 @@ class AnalysisStatus:
     def progress(self):
         if self.scanning:
             return f"{self.tasks} files left to generate, scanning {self.scanning}"
+        if self.total == 0:
+            return "Couldn't identify any files to generate, check server configuration"
         pct = 100 * (self.total - self.tasks) / self.total
         return f"{self.tasks} files left to generate, {pct:0.1f}% complete"
 
@@ -185,15 +199,16 @@ def main(stdscr, messages):
             clear_counter = 0
         clear_counter += 1
         stdscr.erase()
-        stdscr.addstr(0, 0, f"Fitting images on {config['data_nas']} in {config['data_folders']}")
-        stdscr.addstr(1, 0, f"Saving fits to {config['save_nas']} in {config['save_folder']}")
-        stdscr.addstr(2, 0, f"Deconvolving with {config['psf_file']}")
-        stdscr.addstr(3, 0, f"Flat field correcting with {config['flat_field_fl']}")
-        stdscr.addstr(4, 0, "-----------")
-        stdscr.addstr(5, 0, status.progress())
-        stdscr.addstr(6, 0, status.completion())
-        stdscr.addstr(7, 0, "-----------")
-        for i, line in enumerate(status.workers(), start=8):
+        stdscr.addstr(0, 0, f"Server active at {config['server-hostname']}:{config['server-port']}")
+        stdscr.addstr(1, 0, f"Fitting images on {config['data_nas']} in {config['data_folders']}")
+        stdscr.addstr(2, 0, f"Saving fits to {config['save_nas']} in {config['save_folder']}")
+        stdscr.addstr(3, 0, f"Deconvolving with {config['psf_file']}")
+        stdscr.addstr(4, 0, f"Flat field correcting with {config['flat_field_fl']}")
+        stdscr.addstr(5, 0, "-----------")
+        stdscr.addstr(6, 0, status.progress())
+        stdscr.addstr(7, 0, status.completion())
+        stdscr.addstr(8, 0, "-----------")
+        for i, line in enumerate(status.workers(), start=9):
             stdscr.addstr(i, 0, line)
         stdscr.addstr(i + 2, 0, "Press Q to quit")
         stdscr.refresh()
@@ -205,10 +220,11 @@ def main(stdscr, messages):
         time.sleep(0.5)
 
 
-messages = multiprocessing.Queue()
-p = multiprocessing.Process(target=server_process, kwargs={"messages": messages})
-p.start()
-curses.wrapper(main, messages)
-p.terminate()
-p.join()
-p.close()
+if __name__ == "__main__":
+    messages = multiprocessing.Queue()
+    p = multiprocessing.Process(target=server_process, kwargs={"messages": messages})
+    p.start()
+    curses.wrapper(main, messages)
+    p.terminate()
+    p.join()
+    p.close()
