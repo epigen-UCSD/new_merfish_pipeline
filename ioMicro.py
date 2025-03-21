@@ -682,7 +682,7 @@ def apply_deconv(imsm,psf=None,plt_val=False,parameters = {'method':'wiener','be
     
     This wraps around pytoch.
     
-    To install:
+    To install:def apply_de
     pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu117
     pip install sdeconv
     Optional: decided to modify the __init__ file of the SSettingsContainer in 
@@ -1145,6 +1145,8 @@ def read_im(path,return_pos=False):
         nzs = (shape[0]//nchannels)*nchannels
         image = image[:nzs].reshape([shape[0]//nchannels,nchannels,shape[-2],shape[-1]])
         image = image.swapaxes(0,1)
+    if image.dtype == np.uint8:
+        image = image.astype(np.float32)**2
     shape = image.shape
     if return_pos:
         return image,x,y
@@ -2132,13 +2134,15 @@ class decoder_simple():
                 save_fl = save_folder+os.sep+fov.split('.')[0]+'--'+tag+'--col'+str(icol)+'__Xhfits.npy.npz'
                 if not os.path.exists(save_fl):save_fl = save_fl.replace('.npy','')
                 Xh = np.load(save_fl,allow_pickle=True)['Xh']
-                print(Xh.shape)
+                print(iH, icol, Xh.shape)
                 if len(Xh.shape):
                     Xh = Xh[Xh[:,-1]>th_h]
                     if len(Xh):
                         tzxy = drifts[iH][0]
                         Xh[:,:3]+=tzxy# drift correction
                         ih = get_iH(fld) # get bit
+                        #if (ih-1)*ncols + icol >= nbits-1:
+                        #    continue
                         is_low = 'low' in tag
                         bit = ((ih-1)%nbits)*ncols+icol+0.5*is_low
                         icolR = np.array([[icol,bit]]*len(Xh))
@@ -3862,7 +3866,7 @@ class get_dapi_features:
         im = np.array(read_im(self.fl)[-1],dtype=np.float32)
         if self.im_med_fl is not None:
             im = im/self.im_med*np.median(self.im_med)
-        imD = full_deconv(im,psf=self.psf,gpu=self.gpu,s_=512,force=True)
+        imD = full_deconv(im,psf=self.psf,gpu=self.gpu,s_=512,force=True,parameters={'method': 'wiener', 'beta': 0.005, 'niter': 50})
         imDn = norm_slice(imD,s=30)
         imDn_ = imDn/np.std(imDn)
         self.im = imDn_
