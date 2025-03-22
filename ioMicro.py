@@ -3011,8 +3011,10 @@ def plot_gene_mosaic_cells(df,cell_df,gene,plt_fov=False,pixel_size = 0.10833*4,
         }
         viewer.add_points(Xfov,text=text,features=features,edge_width=0,edge_color=[0,0,0,0])
     return viewer
-def compute_flat_field_raw(data_fld,tag="",save_folder =r'\\192.168.0.6\bbfish1e3\DCBBL1_03_14_2023_big\MERFISH_Analysis',ncols=4):
+def compute_flat_field_raw(data_fld,tag="",save_folder =r'\\192.168.0.6\bbfish1e3\DCBBL1_03_14_2023_big\MERFISH_Analysis',ncols=4,max_fovs=None):
     zarrs = glob.glob(data_fld+os.sep+'*.zarr')
+    if max_fovs is not None:
+        zarrs = zarrs[:max_fovs]
     for icol in range(ncols):
         ims_ = [np.array(read_im(fl)[icol][10],dtype=np.float32) for fl in tqdm(zarrs)]
         immed = np.median(ims_,axis=0)
@@ -3866,9 +3868,10 @@ class get_dapi_features:
         im = np.array(read_im(self.fl)[-1],dtype=np.float32)
         if self.im_med_fl is not None:
             im = im/self.im_med*np.median(self.im_med)
-        imD = full_deconv(im,psf=self.psf,gpu=self.gpu,s_=512,force=True,parameters={'method': 'wiener', 'beta': 0.005, 'niter': 50})
+        imD = full_deconv(im,psf=self.psf,gpu=self.gpu,s_=500,force=True,parameters={'method': 'wiener', 'beta': 0.005, 'niter': 50})
         imDn = norm_slice(imD,s=30)
-        imDn_ = imDn/np.std(imDn)
+        #imDn_ = imDn/np.std(imDn)
+        imDn_ = imDn/500
         self.im = imDn_
     def get_X_plus_minus(self):
         #load dapi
